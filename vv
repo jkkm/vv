@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-# A simple tool to manage various VCS checkouts
+# vv: A simple Python tool to manage Various VCS checkouts
 
 # Copyright (c) 2013, 2014 Kyle McMartin <jkkm@jkkm.org>
 #
@@ -18,13 +18,21 @@
 
 import os
 import sys
-
 import argparse
 import configparser
+import subprocess
+
+# GitTree =
+# BzrTree =
+# HgTree  =
+# CVSTree =
+# SVNTree =
+
+# Methods = { '.git', GitTree }, ...
 
 cfgfile = os.path.expanduser("~/.vv.conf")
 if not os.path.exists(cfgfile):
-	sys.stderr.write("no config file %s\n" % cfgfile)
+	sys.stderr.write("no config file %s" % cfgfile)
 
 config = configparser.ConfigParser()
 config.read(cfgfile)
@@ -35,14 +43,27 @@ tree = os.path.expanduser(tree)
 try:
 	os.chdir(tree)
 except OSError as e:
-	print("unable to change directory to %s: %s\n" % tree, e)
+	print("unable to change directory to %s: %s" % tree, e)
 	sys.exit(1)
 
+top = os.getcwd()
 for d in os.listdir(tree):
 	if config.get(d, "type", fallback=None):
 		print("%s has an override" % d)
 	elif os.path.exists(d + '/.git'):
-		print("%s is a git tree" % d)
+		os.chdir(d)
+		print("git pull %s" % d)
+		ret = subprocess.call(["git", "pull"])	
+		if ret:
+			print("%s: update failed" % d)
+		os.chdir(top)
+	elif os.path.exists(d + '/CVS'):
+		os.chdir(d)
+		print("cvs update %s" % d)
+		ret = subprocess.call(["cvs", "update"])
+		if ret:
+			print("%s: update failed" % d)
+		os.chdir(top)
 	else:
-		print("%s is not a git tree" % d)
+		print("%s is an unknown type of tree" % d)
 
