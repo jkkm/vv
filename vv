@@ -1,0 +1,48 @@
+#!/usr/bin/python3
+
+# A simple tool to manage various VCS checkouts
+
+# Copyright (c) 2013, 2014 Kyle McMartin <jkkm@jkkm.org>
+#
+# Permission to use, copy, modify, and distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+# ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+# WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+# ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+# OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+import os
+import sys
+
+import argparse
+import configparser
+
+cfgfile = os.path.expanduser("~/.vv.conf")
+if not os.path.exists(cfgfile):
+	sys.stderr.write("no config file %s\n" % cfgfile)
+
+config = configparser.ConfigParser()
+config.read(cfgfile)
+
+tree = config.get("base", "path", fallback=os.path.expanduser("~/src"))
+tree = os.path.expanduser(tree)
+
+try:
+	os.chdir(tree)
+except OSError as e:
+	print("unable to change directory to %s: %s\n" % tree, e)
+	sys.exit(1)
+
+for d in os.listdir(tree):
+	if config.get(d, "type", fallback=None):
+		print("%s has an override" % d)
+	elif os.path.exists(d + '/.git'):
+		print("%s is a git tree" % d)
+	else:
+		print("%s is not a git tree" % d)
+
