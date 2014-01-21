@@ -47,20 +47,24 @@ except OSError as e:
 	sys.exit(1)
 
 top = os.getcwd()
-for d in os.listdir(tree):
+dirs = os.listdir(tree)
+for d in dirs:
 	if config.get(d, "type", fallback=None):
 		print("%s has an override" % d)
-	elif os.path.exists(d + '/.git'):
+		continue
+
+	if os.path.exists(d + '/.git'):
 		os.chdir(d)
 		print("git pull %s" % d)
-		ret = subprocess.call(["git", "pull"])	
+		ret = subprocess.call(["git", "pull"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 		if ret:
 			print("%s: update failed" % d)
+			sys.exit(1)
 		os.chdir(top)
 	elif os.path.exists(d + '/CVS'):
 		os.chdir(d)
 		print("cvs update %s" % d)
-		ret = subprocess.call(["cvs", "update"])
+		ret = subprocess.call(["cvs", "update"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 		if ret:
 			print("%s: update failed" % d)
 		os.chdir(top)
