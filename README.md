@@ -60,8 +60,8 @@ Results are appended to `~/.vv.log`.
 
 ### `vv dirty`
 
-Lists all repositories under `basedir` that have uncommitted changes. Works
-with all supported VCS types.
+Lists repositories with uncommitted changes. Checks all repos under `basedir`
+plus any in the `include` list. Works with all supported VCS types.
 
 ### `vv include <path>`
 
