@@ -135,21 +135,33 @@ def repo_label(path: Path, basedir: Path) -> str:
     return str(path)
 
 
-def get_repos(config: dict) -> tuple[list[Path], list[Path]]:
-    """Return (basedir_repos, included_repos), filtered and sorted."""
+def require_basedir(config: dict) -> Path | None:
+    """Return basedir if it exists, or print an error and return None."""
+    basedir = get_basedir(config)
+    if not basedir.is_dir():
+        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+        return None
+    return basedir
+
+
+def get_repos(config: dict) -> tuple[list[tuple[Path, VcsDriver]], list[tuple[Path, VcsDriver]]]:
+    """Return (basedir_repos, included_repos) with their VCS drivers, filtered and sorted."""
     basedir = get_basedir(config)
     exclude = get_exclude(config)
-    basedir_repos = sorted(
-        p for p in basedir.iterdir()
-        if p.is_dir() and p.name not in exclude and get_vcs_driver(config, p) is not None
-    )
-    included_repos = sorted(
-        (
-            p for p in get_include(config)
-            if p not in basedir_repos and p.is_dir() and get_vcs_driver(config, p) is not None
-        ),
-        key=lambda p: p.name,
-    )
+    basedir_repos: list[tuple[Path, VcsDriver]] = []
+    basedir_paths: set[Path] = set()
+    for p in sorted(basedir.iterdir()):
+        if p.is_dir() and p.name not in exclude:
+            driver = get_vcs_driver(config, p)
+            if driver is not None:
+                basedir_repos.append((p, driver))
+                basedir_paths.add(p)
+    included_repos: list[tuple[Path, VcsDriver]] = []
+    for p in sorted(get_include(config), key=lambda p: p.name):
+        if p not in basedir_paths and p.is_dir():
+            driver = get_vcs_driver(config, p)
+            if driver is not None:
+                included_repos.append((p, driver))
     return basedir_repos, included_repos
 
 
@@ -218,42 +230,27 @@ def cmd_exclude(args: argparse.Namespace) -> int:
 
 def cmd_list(_args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = get_basedir(config)
-
-    if not basedir.is_dir():
-        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+    basedir = require_basedir(config)
+    if basedir is None:
         return 1
 
     basedir_repos, included_repos = get_repos(config)
-    for path in basedir_repos:
-        driver = get_vcs_driver(config, path)
-        print(f"{path.name} ({driver.name})")
-
-    for path in included_repos:
-        driver = get_vcs_driver(config, path)
-        print(f"{path} ({driver.name})")
+    for path, driver in basedir_repos + included_repos:
+        print(f"{repo_label(path, basedir)} ({driver.name})")
 
     return 0
 
 
 def cmd_dirty(_args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = get_basedir(config)
-
-    if not basedir.is_dir():
-        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+    basedir = require_basedir(config)
+    if basedir is None:
         return 1
 
     basedir_repos, included_repos = get_repos(config)
-    for path in basedir_repos:
-        driver = get_vcs_driver(config, path)
+    for path, driver in basedir_repos + included_repos:
         if is_dirty(path, driver):
-            print(path.name)
-
-    for path in included_repos:
-        driver = get_vcs_driver(config, path)
-        if is_dirty(path, driver):
-            print(path)
+            print(repo_label(path, basedir))
 
     return 0
 
@@ -294,10 +291,9 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
-def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
+def _update_worker(path: Path, driver: VcsDriver, config: dict) -> tuple[str, str | None]:
     """Thread worker: fetch all remotes then pull. Returns (status, output)."""
     tree_cfg = get_tree_cfg(config, path)
-    driver = get_vcs_driver(config, path)
     if is_dirty(path, driver):
         return "dirty", None
 
@@ -317,12 +313,10 @@ def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
 
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = get_basedir(config)
-    jobs = get_jobs(config)
-
-    if not basedir.is_dir():
-        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+    basedir = require_basedir(config)
+    if basedir is None:
         return 1
+    jobs = get_jobs(config)
 
     basedir_repos, included_repos = get_repos(config)
     repos = basedir_repos + included_repos
@@ -333,15 +327,15 @@ def cmd_update(_args: argparse.Namespace) -> int:
     # Workers push results into a queue; main thread prints them as they arrive
     result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
-    def worker(path: Path, config: dict) -> None:
-        status, output = _update_worker(path, config)
+    def worker(path: Path, driver: VcsDriver, config: dict) -> None:
+        status, output = _update_worker(path, driver, config)
         result_queue.put((path, status, output))
 
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[Path] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
-        for path in repos:
-            executor.submit(worker, path, config)
+        for path, driver in repos:
+            executor.submit(worker, path, driver, config)
         for _ in repos:
             path, status, output = result_queue.get()
             label = repo_label(path, basedir)
