@@ -216,6 +216,26 @@ def cmd_exclude(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list(_args: argparse.Namespace) -> int:
+    config = load_config()
+    basedir = get_basedir(config)
+
+    if not basedir.is_dir():
+        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+        return 1
+
+    basedir_repos, included_repos = get_repos(config)
+    for path in basedir_repos:
+        driver = get_vcs_driver(config, path)
+        print(f"{path.name} ({driver.name})")
+
+    for path in included_repos:
+        driver = get_vcs_driver(config, path)
+        print(f"{path} ({driver.name})")
+
+    return 0
+
+
 def cmd_dirty(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
@@ -367,6 +387,7 @@ def main() -> int:
         description="Keep source trees up to date with upstream",
     )
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("list", help="List managed repositories")
     sub.add_parser("update", help="Pull all clean repositories")
     sub.add_parser("dirty", help="List repositories with uncommitted changes")
 
@@ -382,6 +403,7 @@ def main() -> int:
         return 1
 
     dispatch = {
+        "list": cmd_list,
         "update": cmd_update,
         "dirty": cmd_dirty,
         "include": cmd_include,
