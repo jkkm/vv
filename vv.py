@@ -20,6 +20,7 @@ import subprocess
 import argparse
 import queue
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,23 @@ CONFIG_FILE = Path.home() / ".vv.conf"
 LOG_FILE = Path.home() / ".vv.log"
 DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
+
+
+@dataclass(frozen=True)
+class VcsDriver:
+    name: str
+    marker: str               # subdirectory/file that identifies this VCS
+    dirty_cmd: tuple[str, ...]  # produces output iff repo is dirty
+    update_cmd: tuple[str, ...]  # default update command (no pullcmd set)
+
+
+VCS_DRIVERS: list[VcsDriver] = [
+    VcsDriver("git", ".git",  ("git", "status", "--untracked-files=no", "--porcelain"), ("git", "pull")),
+    VcsDriver("hg",  ".hg",   ("hg",  "status", "-mard"),                               ("hg",  "pull", "-u")),
+    VcsDriver("svn", ".svn",  ("svn", "status", "-q"),                                  ("svn", "update")),
+    VcsDriver("cvs", "CVS",   ("cvs", "-n", "-q", "update"),                             ("cvs", "update")),
+]
+_VCS_BY_NAME: dict[str, VcsDriver] = {d.name: d for d in VCS_DRIVERS}
 
 
 def load_config() -> dict:
@@ -79,28 +97,25 @@ def get_basedir(config: dict) -> Path:
     return DEFAULT_BASEDIR
 
 
-def is_git_repo(path: Path) -> bool:
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        cwd=path,
-        capture_output=True,
-    )
-    return result.returncode == 0
+def detect_vcs(path: Path) -> VcsDriver | None:
+    for driver in VCS_DRIVERS:
+        if (path / driver.marker).exists():
+            return driver
+    return None
 
 
-def is_dirty(path: Path) -> bool:
-    """True if the repo has staged or unstaged changes to tracked files."""
+def get_vcs_driver(config: dict, path: Path) -> VcsDriver | None:
+    vcs_name = get_tree_cfg(config, path).get("type")
+    if vcs_name:
+        return _VCS_BY_NAME.get(vcs_name)
+    return detect_vcs(path)
+
+
+def is_dirty(path: Path, driver: VcsDriver) -> bool:
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=path,
-        capture_output=True,
-        text=True,
+        list(driver.dirty_cmd), cwd=path, capture_output=True, text=True
     )
-    tracked_changes = [
-        line for line in result.stdout.splitlines()
-        if not line.startswith("??")
-    ]
-    return bool(tracked_changes)
+    return bool(result.stdout.strip())
 
 
 def get_exclude(config: dict) -> set[str]:
@@ -131,8 +146,8 @@ def cmd_include(args: argparse.Namespace) -> int:
     if not path.exists():
         print(f"error: path does not exist: {path}", file=sys.stderr)
         return 1
-    if not is_git_repo(path):
-        print(f"error: not a git repository: {path}", file=sys.stderr)
+    if detect_vcs(path) is None:
+        print(f"error: no supported VCS found at: {path}", file=sys.stderr)
         return 1
     config = load_config()
     include = list(config.get("include") or [])
@@ -188,22 +203,23 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     for path in sorted(p for p in basedir.iterdir() if p.is_dir()):
         if path.name in exclude:
             continue
-        if not is_git_repo(path):
+        driver = detect_vcs(path)
+        if driver is None:
             continue
-        if is_dirty(path):
+        if is_dirty(path, driver):
             print(path.name)
 
     return 0
 
 
-def run_pull(path: Path, pullcmd: str | None = None) -> tuple[bool, str]:
+def run_pull(path: Path, driver: VcsDriver, pullcmd: str | None = None) -> tuple[bool, str]:
     if pullcmd:
         result = subprocess.run(
             pullcmd, shell=True, cwd=path, capture_output=True, text=True
         )
     else:
         result = subprocess.run(
-            ["git", "pull"], cwd=path, capture_output=True, text=True
+            list(driver.update_cmd), cwd=path, capture_output=True, text=True
         )
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
@@ -234,19 +250,22 @@ def spawn_shell(path: Path) -> None:
 
 def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
     """Thread worker: fetch all remotes then pull. Returns (status, output)."""
-    if is_dirty(path):
+    tree_cfg = get_tree_cfg(config, path)
+    driver = get_vcs_driver(config, path)
+    if driver is None:
+        return "skip", None
+    if is_dirty(path, driver):
         return "dirty", None
 
-    tree_cfg = get_tree_cfg(config, path)
-    fetch_remotes = tree_cfg.get("remotes") or get_all_remotes(path)
-
     errors = []
-    for remote in fetch_remotes:
-        ok, out = git_fetch(path, remote)
-        if not ok and out:
-            errors.append(f"fetch {remote}: {out}")
+    if driver.name == "git":
+        fetch_remotes = tree_cfg.get("remotes") or get_all_remotes(path)
+        for remote in fetch_remotes:
+            ok, out = git_fetch(path, remote)
+            if not ok and out:
+                errors.append(f"fetch {remote}: {out}")
 
-    ok, pull_out = run_pull(path, tree_cfg.get("pullcmd"))
+    ok, pull_out = run_pull(path, driver, tree_cfg.get("pullcmd"))
 
     parts = errors + ([pull_out] if pull_out else [])
     return ("ok" if ok else "failed"), ("\n".join(parts) or None)
@@ -264,7 +283,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
 
     basedir_repos = sorted(
         p for p in basedir.iterdir()
-        if p.is_dir() and p.name not in exclude and is_git_repo(p)
+        if p.is_dir() and p.name not in exclude and get_vcs_driver(config, p) is not None
     )
     included_repos = [p for p in get_include(config) if p not in basedir_repos]
     repos = basedir_repos + included_repos
@@ -300,8 +319,9 @@ def cmd_update(_args: argparse.Namespace) -> int:
     exit_code = 0
     for path in failures:
         spawn_shell(path)
+        driver = get_vcs_driver(config, path)
         pullcmd = get_tree_cfg(config, path).get("pullcmd")
-        success, output = run_pull(path, pullcmd)
+        success, output = run_pull(path, driver, pullcmd)
         if success:
             print(f"{path.name}: {output or 'ok'}")
             log_entries.append((path.name, "ok", output or None))
@@ -326,7 +346,7 @@ def main() -> int:
     sub.add_parser("dirty", help="List repositories with uncommitted changes")
 
     p_include = sub.add_parser("include", help="Explicitly include a repository")
-    p_include.add_argument("path", help="Path to the git repository")
+    p_include.add_argument("path", help="Path to the repository")
 
     p_exclude = sub.add_parser("exclude", help="Add a basedir subdirectory to the exclude list")
     p_exclude.add_argument("path", help="Directory name or path to exclude")

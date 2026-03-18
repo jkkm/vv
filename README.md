@@ -1,6 +1,6 @@
 # vv
 
-A simple tool to keep a collection of git repositories up to date with upstream.
+A simple tool to keep a collection of source repositories up to date with upstream. Supports git, Mercurial (hg), Subversion (svn), and CVS, with automatic detection from directory markers.
 
 ## Requirements
 
@@ -38,33 +38,36 @@ trees:
 
 | Key (per-tree) | Description |
 |---|---|
-| `remotes` | List of remotes to fetch; defaults to all from `git remote` |
-| `pullcmd` | Shell command to run instead of `git pull`; defaults to a bare `git pull` using the branch's tracking remote |
+| `type` | VCS type (`git`, `hg`, `svn`, `cvs`); autodetected from directory markers (`.git`, `.hg`, `.svn`, `CVS`) when absent |
+| `remotes` | List of remotes to fetch before pulling; defaults to all from `git remote` (git only) |
+| `pullcmd` | Shell command to run instead of the default update command for the VCS |
 
 ## Commands
 
 ### `vv update`
 
-For each repository, first fetches remotes, then runs the pull. Fetch remotes
-are taken from the per-tree `remotes` list if set, otherwise all remotes
-returned by `git remote` are fetched. The pull is a bare `git pull` by default
-(using the branch's tracking remote), or the per-tree `pullcmd` shell command if
-set. Dirty trees are skipped with a warning. Results are printed by the main
-thread as each update completes, avoiding interleaved output. If any pulls fail,
-an interactive shell is spawned in each affected tree (after all parallel updates
-finish) so the problem can be investigated; the pull is retried when the shell
-exits.
+For each repository, runs the appropriate update command for its VCS. For git
+repos, all remotes are fetched first (or the per-tree `remotes` list if set);
+this pre-fetch step is git-only. The update command defaults to the VCS
+default (`git pull`, `hg pull -u`, `svn update`, `cvs update`), or the
+per-tree `pullcmd` shell command if set. Dirty trees are skipped with a
+warning. Results are printed by the main thread as each update completes,
+avoiding interleaved output. If any pulls fail, an interactive shell is spawned
+in each affected tree (after all parallel updates finish) so the problem can be
+investigated; the pull is retried when the shell exits.
 
 Results are appended to `~/.vv.log`.
 
 ### `vv dirty`
 
-Lists all repositories under `basedir` that have uncommitted changes.
+Lists all repositories under `basedir` that have uncommitted changes. Works
+with all supported VCS types.
 
 ### `vv include <path>`
 
 Adds a repository to the `include` list in `~/.vv.conf`. The path may be
-anywhere on the filesystem, not just under `basedir`.
+anywhere on the filesystem, not just under `basedir`. Accepts any supported
+VCS type.
 
 ### `vv exclude <path>`
 
