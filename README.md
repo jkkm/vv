@@ -60,7 +60,7 @@ or inline as the value under `include.<path>` for standalone repos.
 | Key | Description |
 |-----|-------------|
 | `type` | VCS type (`git`, `hg`, `svn`, `cvs`); autodetected from directory markers (`.git`, `.hg`, `.svn`, `CVS`) when absent |
-| `remotes` | List of remotes to fetch before pulling; defaults to all from `git remote` (git only) |
+| `remotes` | List of remotes to fetch; defaults to all from `git remote` (git only) |
 | `updatecmd` | Shell command to run instead of the default update command for the VCS |
 
 ### Include
@@ -74,14 +74,15 @@ per-tree overrides), or `null`/empty for defaults.
 ### `vv update`
 
 For each repository, runs the appropriate update command for its VCS. For git
-repos, all remotes are fetched first (or the per-tree `remotes` list if set);
-this pre-fetch step is git-only. The update command defaults to the VCS
-default (`git pull`, `hg pull -u`, `svn update`, `cvs update`), or the
-per-tree `updatecmd` shell command if set. Dirty trees are skipped with a
-warning. Results are printed by the main thread as each update completes,
-avoiding interleaved output. If any pulls fail, an interactive shell is spawned
-in each affected tree (after all parallel updates finish) so the problem can be
-investigated; the pull is retried when the shell exits.
+repos, all remotes are fetched first (or the per-tree `remotes` list if set),
+then a fast-forward merge is performed; this fetch-then-merge approach is
+git-only. Other VCS types use their native update command (`hg pull -u`,
+`svn update`, `cvs update`), or the per-tree `updatecmd` shell command if set.
+Dirty trees are skipped with a warning. Results are printed by the main thread
+as each update completes, avoiding interleaved output. If any updates fail, an
+interactive shell is spawned in each affected tree (after all parallel updates
+finish) so the problem can be investigated; the update is retried when the
+shell exits.
 
 Results are appended to `~/.vv.log`.
 

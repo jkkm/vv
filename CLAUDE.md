@@ -11,7 +11,7 @@ Keeps a collection of source repos up to date with upstream. Scans multiple base
 ## Commands
 
 - `vv list` — list managed repositories
-- `vv update` — parallel fetch+pull, skip dirty trees, interactive shell on failure
+- `vv update` — parallel fetch+merge, skip dirty trees, interactive shell on failure
 - `vv dirty` — list repos with uncommitted changes
 - `vv include <path>` — add a repo from anywhere on the filesystem
 - `vv exclude <path>` — skip a basedir subdirectory
@@ -27,7 +27,7 @@ Everything lives in `vv.py`:
 - **`VcsDriver`** — frozen dataclass defining a VCS type: name, directory marker (e.g. `.git`), dirty-check command, and default update command. The four built-in drivers are in `VCS_DRIVERS`; lookup by name via `_VCS_BY_NAME`.
 - **`Repo`** — dataclass holding a repo's path, its `VcsDriver`, a display label, and per-tree config from the YAML file.
 - **Config flow** — `load_config()` reads `~/.vv.conf` with `yaml.safe_load`. `get_repos()` walks each basedir's immediate subdirectories plus `include` entries, calls `detect_vcs()` (checks for marker dirs) or uses explicit `type`, and builds `Repo` objects.
-- **Threading model** — `cmd_update` uses `ThreadPoolExecutor` with a `SimpleQueue`. Workers run `_update_worker` (fetch + pull) and post results to the queue. The main thread reads results sequentially to avoid interleaved output, then spawns interactive shells for failures.
+- **Threading model** — `cmd_update` uses `ThreadPoolExecutor` with a `SimpleQueue`. Workers run `_update_worker` (fetch + ff-merge) and post results to the queue. The main thread reads results sequentially to avoid interleaved output, then spawns interactive shells for failures.
 
 ## Development
 

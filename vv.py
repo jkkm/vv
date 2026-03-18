@@ -45,7 +45,7 @@ class VcsDriver:
 
 
 VCS_DRIVERS: list[VcsDriver] = [
-    VcsDriver("git", ".git",  ("git", "status", "--untracked-files=no", "--porcelain"), ("git", "pull")),
+    VcsDriver("git", ".git",  ("git", "status", "--untracked-files=no", "--porcelain"), ("git", "merge", "--ff-only")),
     VcsDriver("hg",  ".hg",   ("hg",  "status", "-mard"),                               ("hg",  "pull", "-u")),
     VcsDriver("svn", ".svn",  ("svn", "status", "-q"),                                  ("svn", "update")),
     VcsDriver("cvs", "CVS",   ("cvs", "-n", "-q", "update"),                             ("cvs", "update")),
@@ -358,12 +358,12 @@ def write_log(log_file: Path, entries: list[tuple[str, str, str | None]]) -> Non
 
 def spawn_shell(path: Path) -> None:
     shell = os.environ.get("SHELL", "/bin/sh")
-    print(f"  spawning {shell} in {path} — exit to retry pull")
+    print(f"  spawning {shell} in {path} — exit to retry update")
     subprocess.run([shell], cwd=path)
 
 
 def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
-    """Thread worker: fetch all remotes then pull.
+    """Thread worker: fetch all remotes then fast-forward merge.
 
     Returns (status, display_output, log_detail) where display_output is
     shown to the user and log_detail is the full output written to the log.
@@ -382,10 +382,10 @@ def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
             elif out:
                 fetch_outputs.append(f"fetch {remote}: {out}")
 
-    ok, pull_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
+    ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
 
     status = "ok" if ok else "failed"
-    display_parts = errors + ([pull_out] if pull_out else [])
+    display_parts = errors + ([update_out] if update_out else [])
     display = "\n".join(display_parts) or None
     log_parts = fetch_outputs + display_parts
     log_detail = "\n".join(log_parts) or None
@@ -424,7 +424,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
                 print(f"{repo.label}: {display or 'ok'}")
                 log_entries.append((repo.label, "ok", log_detail))
             else:
-                print(f"{repo.label}: pull failed\n  {display}", file=sys.stderr)
+                print(f"{repo.label}: update failed\n  {display}", file=sys.stderr)
                 failures.append(repo)
 
     exit_code = 0
@@ -440,7 +440,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
             print(f"{repo.label}: {output or 'ok'}")
             log_entries.append((repo.label, "ok", output or None))
         else:
-            print(f"{repo.label}: pull failed\n  {output}", file=sys.stderr)
+            print(f"{repo.label}: update failed\n  {output}", file=sys.stderr)
             log_entries.append((repo.label, "failed", output or None))
             exit_code = 1
 
