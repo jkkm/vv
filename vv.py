@@ -14,6 +14,7 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 """vv - keep source trees up to date with upstream"""
 
+import os
 import sys
 import subprocess
 import argparse
@@ -127,6 +128,23 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     return 0
 
 
+def git_pull(path: Path) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", "pull", "origin"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
+
+
+def spawn_shell(path: Path) -> None:
+    shell = os.environ.get("SHELL", "/bin/sh")
+    print(f"  spawning {shell} in {path} — exit to retry pull")
+    subprocess.run([shell], cwd=path)
+
+
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
@@ -150,18 +168,18 @@ def cmd_update(_args: argparse.Namespace) -> int:
         if is_dirty(path):
             print(f"{path.name}: skipped (dirty)")
             continue
-        result = subprocess.run(
-            ["git", "pull", "origin"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-        )
-        output = (result.stdout + result.stderr).strip()
-        if result.returncode == 0:
+        success, output = git_pull(path)
+        if success:
             print(f"{path.name}: {output or 'ok'}")
         else:
             print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
-            exit_code = 1
+            spawn_shell(path)
+            success, output = git_pull(path)
+            if success:
+                print(f"{path.name}: {output or 'ok'}")
+            else:
+                print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
+                exit_code = 1
 
     return exit_code
 
