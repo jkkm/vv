@@ -321,6 +321,10 @@ def cmd_update(_args: argparse.Namespace) -> int:
     for path in failures:
         spawn_shell(path)
         driver = get_vcs_driver(config, path)
+        if driver is None:
+            log_entries.append((path.name, "failed", "VCS marker gone"))
+            exit_code = 1
+            continue
         pullcmd = get_tree_cfg(config, path).get("pullcmd")
         success, output = run_pull(path, driver, pullcmd)
         if success:
