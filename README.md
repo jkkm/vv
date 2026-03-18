@@ -35,8 +35,9 @@ trees:
 ### `vv update`
 
 Pulls all git repositories under `basedir` (excluding those in `exclude`) in
-parallel (`jobs` workers). Dirty trees are skipped with a warning. All output
-is emitted from the main thread in sorted order once the pulls complete. If
+parallel (`jobs` workers). Dirty trees are skipped with a warning. Results
+are printed by the main thread as each pull completes, avoiding interleaved
+output. If
 any pulls fail, an interactive shell is spawned in each affected tree (after
 all parallel pulls finish) so the problem can be investigated; the pull is
 retried when the shell exits.

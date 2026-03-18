@@ -18,6 +18,7 @@ import os
 import sys
 import subprocess
 import argparse
+import queue
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -205,28 +206,29 @@ def cmd_update(_args: argparse.Namespace) -> int:
         print(f"no repositories found in {basedir}")
         return 0
 
-    # Pull all repos in parallel; collect results in sorted order
-    with ThreadPoolExecutor(max_workers=jobs) as executor:
-        futures = {
-            path: executor.submit(_pull_worker, path, get_remote(config, path.name))
-            for path in repos
-        }
-    results = {path: fut.result() for path, fut in futures.items()}
+    # Workers push results into a queue; main thread prints them as they arrive
+    result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
-    # Emit output from main thread in order; collect failures for later
+    def worker(path: Path, remote: str) -> None:
+        status, output = _pull_worker(path, remote)
+        result_queue.put((path, status, output))
+
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[Path] = []
-    for path in repos:
-        status, output = results[path]
-        if status == "dirty":
-            print(f"{path.name}: skipped (dirty)")
-            log_entries.append((path.name, "dirty", None))
-        elif status == "ok":
-            print(f"{path.name}: {output or 'ok'}")
-            log_entries.append((path.name, "ok", output))
-        else:
-            print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
-            failures.append(path)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        for path in repos:
+            executor.submit(worker, path, get_remote(config, path.name))
+        for _ in repos:
+            path, status, output = result_queue.get()
+            if status == "dirty":
+                print(f"{path.name}: skipped (dirty)")
+                log_entries.append((path.name, "dirty", None))
+            elif status == "ok":
+                print(f"{path.name}: {output or 'ok'}")
+                log_entries.append((path.name, "ok", output))
+            else:
+                print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
+                failures.append(path)
 
     # Handle failures interactively once all pulls are done
     exit_code = 0
