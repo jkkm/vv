@@ -96,6 +96,31 @@ def get_exclude(config: dict) -> set[str]:
     return set(raw)
 
 
+def get_include(config: dict) -> list[Path]:
+    raw = config.get("include") or []
+    return [Path(p).expanduser() for p in raw]
+
+
+def cmd_include(args: argparse.Namespace) -> int:
+    path = Path(args.path).expanduser().resolve()
+    if not path.exists():
+        print(f"error: path does not exist: {path}", file=sys.stderr)
+        return 1
+    if not is_git_repo(path):
+        print(f"error: not a git repository: {path}", file=sys.stderr)
+        return 1
+    config = load_config()
+    include = list(config.get("include") or [])
+    if str(path) in include:
+        print(f"already included: {path}")
+        return 0
+    include.append(str(path))
+    config["include"] = include
+    save_config(config)
+    print(f"included: {path}")
+    return 0
+
+
 def cmd_exclude(args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
@@ -198,10 +223,12 @@ def cmd_update(_args: argparse.Namespace) -> int:
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
         return 1
 
-    repos = sorted(
+    basedir_repos = sorted(
         p for p in basedir.iterdir()
         if p.is_dir() and p.name not in exclude and is_git_repo(p)
     )
+    included_repos = [p for p in get_include(config) if p not in basedir_repos]
+    repos = basedir_repos + included_repos
     if not repos:
         print(f"no repositories found in {basedir}")
         return 0
@@ -256,10 +283,13 @@ def main() -> int:
         description="Keep source trees up to date with upstream",
     )
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("update", help="Pull all clean repositories under basedir")
+    sub.add_parser("update", help="Pull all clean repositories")
     sub.add_parser("dirty", help="List repositories with uncommitted changes")
 
-    p_exclude = sub.add_parser("exclude", help="Add a directory to the exclude list")
+    p_include = sub.add_parser("include", help="Explicitly include a repository")
+    p_include.add_argument("path", help="Path to the git repository")
+
+    p_exclude = sub.add_parser("exclude", help="Add a basedir subdirectory to the exclude list")
     p_exclude.add_argument("path", help="Directory name or path to exclude")
 
     args = parser.parse_args()
@@ -270,6 +300,7 @@ def main() -> int:
     dispatch = {
         "update": cmd_update,
         "dirty": cmd_dirty,
+        "include": cmd_include,
         "exclude": cmd_exclude,
     }
     return dispatch[args.command](args)

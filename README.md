@@ -17,7 +17,8 @@ An example config is provided in `vv.conf`.
 | `basedir` | `~/src` | Directory whose immediate subdirectories are managed |
 | `remote` | `origin` | Remote name to pull from |
 | `jobs` | `4` | Number of parallel pulls |
-| `exclude` | *(none)* | List of subdirectory names to skip |
+| `include` | *(none)* | List of repo paths to manage outside `basedir` |
+| `exclude` | *(none)* | List of `basedir` subdirectory names to skip |
 | `trees` | *(none)* | Per-tree overrides (see below) |
 
 ### Per-tree overrides
@@ -47,6 +48,11 @@ Results are appended to `~/.vv.log`.
 ### `vv dirty`
 
 Lists all repositories under `basedir` that have uncommitted changes.
+
+### `vv include <path>`
+
+Adds a repository to the `include` list in `~/.vv.conf`. The path may be
+anywhere on the filesystem, not just under `basedir`.
 
 ### `vv exclude <path>`
 
