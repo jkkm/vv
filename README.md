@@ -2,6 +2,8 @@
 
 A simple tool to keep a collection of source repositories up to date with upstream. Supports git, Mercurial (hg), Subversion (svn), and CVS, with automatic detection from directory markers.
 
+But mostly a sandbox for Claude code.
+
 ## Requirements
 
 - Python 3.11+
