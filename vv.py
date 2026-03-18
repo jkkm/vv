@@ -28,6 +28,7 @@ except ImportError:
 
 CONFIG_FILE = Path.home() / ".vv.conf"
 DEFAULT_BASEDIR = Path.home() / "src"
+DEFAULT_REMOTE = "origin"
 
 
 def load_config() -> dict:
@@ -40,6 +41,10 @@ def load_config() -> dict:
 def save_config(config: dict) -> None:
     with CONFIG_FILE.open("w") as f:
         yaml.dump(config, f, default_flow_style=False)
+
+
+def get_remote(config: dict) -> str:
+    return config.get("remote") or DEFAULT_REMOTE
 
 
 def get_basedir(config: dict) -> Path:
@@ -128,9 +133,9 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     return 0
 
 
-def git_pull(path: Path) -> tuple[bool, str]:
+def git_pull(path: Path, remote: str) -> tuple[bool, str]:
     result = subprocess.run(
-        ["git", "pull", "origin"],
+        ["git", "pull", remote],
         cwd=path,
         capture_output=True,
         text=True,
@@ -149,6 +154,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
     exclude = get_exclude(config)
+    remote = get_remote(config)
 
     if not basedir.is_dir():
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
@@ -168,13 +174,13 @@ def cmd_update(_args: argparse.Namespace) -> int:
         if is_dirty(path):
             print(f"{path.name}: skipped (dirty)")
             continue
-        success, output = git_pull(path)
+        success, output = git_pull(path, remote)
         if success:
             print(f"{path.name}: {output or 'ok'}")
         else:
             print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
             spawn_shell(path)
-            success, output = git_pull(path)
+            success, output = git_pull(path, remote)
             if success:
                 print(f"{path.name}: {output or 'ok'}")
             else:
