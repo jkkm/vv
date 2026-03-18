@@ -128,6 +128,24 @@ def get_include(config: dict) -> list[Path]:
     return [Path(p).expanduser() for p in raw]
 
 
+def get_repos(config: dict) -> tuple[list[Path], list[Path]]:
+    """Return (basedir_repos, included_repos), filtered and sorted."""
+    basedir = get_basedir(config)
+    exclude = get_exclude(config)
+    basedir_repos = sorted(
+        p for p in basedir.iterdir()
+        if p.is_dir() and p.name not in exclude and get_vcs_driver(config, p) is not None
+    )
+    included_repos = sorted(
+        (
+            p for p in get_include(config)
+            if p not in basedir_repos and p.is_dir() and get_vcs_driver(config, p) is not None
+        ),
+        key=lambda p: p.name,
+    )
+    return basedir_repos, included_repos
+
+
 def get_tree_cfg(config: dict, path: Path) -> dict:
     trees = config.get("trees") or {}
     resolved = path.resolve()
@@ -194,25 +212,19 @@ def cmd_exclude(args: argparse.Namespace) -> int:
 def cmd_dirty(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
-    exclude = get_exclude(config)
 
     if not basedir.is_dir():
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
         return 1
 
-    for path in sorted(p for p in basedir.iterdir() if p.is_dir()):
-        if path.name in exclude:
-            continue
+    basedir_repos, included_repos = get_repos(config)
+    for path in basedir_repos:
         driver = get_vcs_driver(config, path)
-        if driver is None:
-            continue
         if is_dirty(path, driver):
             print(path.name)
 
-    for path in sorted(get_include(config), key=lambda p: p.name):
+    for path in included_repos:
         driver = get_vcs_driver(config, path)
-        if driver is None:
-            continue
         if is_dirty(path, driver):
             print(path)
 
@@ -279,21 +291,13 @@ def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
-    exclude = get_exclude(config)
     jobs = get_jobs(config)
 
     if not basedir.is_dir():
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
         return 1
 
-    basedir_repos = sorted(
-        p for p in basedir.iterdir()
-        if p.is_dir() and p.name not in exclude and get_vcs_driver(config, p) is not None
-    )
-    included_repos = [
-        p for p in get_include(config)
-        if p not in basedir_repos and p.is_dir() and get_vcs_driver(config, p) is not None
-    ]
+    basedir_repos, included_repos = get_repos(config)
     repos = basedir_repos + included_repos
     if not repos:
         print(f"no repositories found in {basedir}")
