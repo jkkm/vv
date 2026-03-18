@@ -52,11 +52,55 @@ def get_jobs(config: dict) -> int:
     return int(config.get("jobs") or DEFAULT_JOBS)
 
 
-def get_remote(config: dict, tree_name: str | None = None) -> str:
-    if tree_name:
-        tree_cfg = (config.get("trees") or {}).get(tree_name) or {}
-        if tree_cfg.get("remote"):
-            return tree_cfg["remote"]
+def get_all_remotes(path: Path) -> list[str]:
+    result = subprocess.run(
+        ["git", "remote"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.splitlines()
+
+
+def get_branch_remote(path: Path) -> str | None:
+    branch_result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    branch = branch_result.stdout.strip()
+    if not branch or branch == "HEAD":
+        return None
+    remote_result = subprocess.run(
+        ["git", "config", f"branch.{branch}.remote"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    if remote_result.returncode != 0:
+        return None
+    return remote_result.stdout.strip() or None
+
+
+def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", "fetch", remote],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
+
+
+def get_pull_remote(config: dict, path: Path) -> str:
+    tree_cfg = (config.get("trees") or {}).get(path.name) or {}
+    if tree_cfg.get("remote"):
+        return tree_cfg["remote"]
+    branch_remote = get_branch_remote(path)
+    if branch_remote:
+        return branch_remote
     return config.get("remote") or DEFAULT_REMOTE
 
 
@@ -205,12 +249,25 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
-def _pull_worker(path: Path, remote: str) -> tuple[str, str | None]:
-    """Thread worker: returns (status, output). Does not print anything."""
+def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
+    """Thread worker: fetch all remotes then pull. Returns (status, output)."""
     if is_dirty(path):
         return "dirty", None
-    success, output = git_pull(path, remote)
-    return ("ok" if success else "failed"), (output or None)
+
+    tree_cfg = (config.get("trees") or {}).get(path.name) or {}
+    fetch_remotes = tree_cfg.get("remotes") or get_all_remotes(path)
+
+    errors = []
+    for remote in fetch_remotes:
+        ok, out = git_fetch(path, remote)
+        if not ok and out:
+            errors.append(f"fetch {remote}: {out}")
+
+    pull_remote = get_pull_remote(config, path)
+    ok, pull_out = git_pull(path, pull_remote)
+
+    parts = errors + ([pull_out] if pull_out else [])
+    return ("ok" if ok else "failed"), ("\n".join(parts) or None)
 
 
 def cmd_update(_args: argparse.Namespace) -> int:
@@ -236,15 +293,15 @@ def cmd_update(_args: argparse.Namespace) -> int:
     # Workers push results into a queue; main thread prints them as they arrive
     result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
-    def worker(path: Path, remote: str) -> None:
-        status, output = _pull_worker(path, remote)
+    def worker(path: Path, config: dict) -> None:
+        status, output = _update_worker(path, config)
         result_queue.put((path, status, output))
 
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[Path] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         for path in repos:
-            executor.submit(worker, path, get_remote(config, path.name))
+            executor.submit(worker, path, config)
         for _ in repos:
             path, status, output = result_queue.get()
             if status == "dirty":
@@ -261,8 +318,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
     exit_code = 0
     for path in failures:
         spawn_shell(path)
-        remote = get_remote(config, path.name)
-        success, output = git_pull(path, remote)
+        pull_remote = get_pull_remote(config, path)
+        success, output = git_pull(path, pull_remote)
         if success:
             print(f"{path.name}: {output or 'ok'}")
             log_entries.append((path.name, "ok", output or None))

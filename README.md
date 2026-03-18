@@ -29,19 +29,29 @@ Any top-level key can be overridden for a specific tree under `trees`:
 trees:
   linux:
     remote: upstream
+    remotes:
+      - upstream
+      - origin
 ```
+
+| Key (per-tree) | Description |
+|---|---|
+| `remotes` | List of remotes to fetch; defaults to all from `git remote` |
 
 ## Commands
 
 ### `vv update`
 
-Pulls all git repositories under `basedir` (excluding those in `exclude`) in
-parallel (`jobs` workers). Dirty trees are skipped with a warning. Results
-are printed by the main thread as each pull completes, avoiding interleaved
-output. If
-any pulls fail, an interactive shell is spawned in each affected tree (after
-all parallel pulls finish) so the problem can be investigated; the pull is
-retried when the shell exits.
+For each repository, first fetches all configured remotes in parallel (`jobs`
+workers), then pulls the tracking branch. Fetch remotes are taken from the
+per-tree `remotes` list if set, otherwise all remotes returned by `git remote`
+are fetched. The pull remote is resolved from the per-tree `remote` key, the
+branch's tracking remote, the top-level `remote` key, or `origin` (in that
+order). Dirty trees are skipped with a warning. Results are printed by the main
+thread as each update completes, avoiding interleaved output. If any pulls fail,
+an interactive shell is spawned in each affected tree (after all parallel updates
+finish) so the problem can be investigated; the pull is retried when the shell
+exits.
 
 Results are appended to `~/.vv.log`.
 
