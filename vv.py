@@ -32,7 +32,6 @@ except ImportError:
 CONFIG_FILE = Path.home() / ".vv.conf"
 LOG_FILE = Path.home() / ".vv.log"
 DEFAULT_BASEDIR = Path.home() / "src"
-DEFAULT_REMOTE = "origin"
 DEFAULT_JOBS = 4
 
 
@@ -62,27 +61,6 @@ def get_all_remotes(path: Path) -> list[str]:
     return result.stdout.splitlines()
 
 
-def get_branch_remote(path: Path) -> str | None:
-    branch_result = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=path,
-        capture_output=True,
-        text=True,
-    )
-    branch = branch_result.stdout.strip()
-    if not branch or branch == "HEAD":
-        return None
-    remote_result = subprocess.run(
-        ["git", "config", f"branch.{branch}.remote"],
-        cwd=path,
-        capture_output=True,
-        text=True,
-    )
-    if remote_result.returncode != 0:
-        return None
-    return remote_result.stdout.strip() or None
-
-
 def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
     result = subprocess.run(
         ["git", "fetch", remote],
@@ -92,16 +70,6 @@ def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
     )
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
-
-
-def get_pull_remote(config: dict, path: Path) -> str:
-    tree_cfg = get_tree_cfg(config, path)
-    if tree_cfg.get("remote"):
-        return tree_cfg["remote"]
-    branch_remote = get_branch_remote(path)
-    if branch_remote:
-        return branch_remote
-    return config.get("remote") or DEFAULT_REMOTE
 
 
 def get_basedir(config: dict) -> Path:
@@ -228,13 +196,15 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     return 0
 
 
-def git_pull(path: Path, remote: str) -> tuple[bool, str]:
-    result = subprocess.run(
-        ["git", "pull", remote],
-        cwd=path,
-        capture_output=True,
-        text=True,
-    )
+def run_pull(path: Path, pullcmd: str | None = None) -> tuple[bool, str]:
+    if pullcmd:
+        result = subprocess.run(
+            pullcmd, shell=True, cwd=path, capture_output=True, text=True
+        )
+    else:
+        result = subprocess.run(
+            ["git", "pull"], cwd=path, capture_output=True, text=True
+        )
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
 
@@ -276,8 +246,7 @@ def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
         if not ok and out:
             errors.append(f"fetch {remote}: {out}")
 
-    pull_remote = get_pull_remote(config, path)
-    ok, pull_out = git_pull(path, pull_remote)
+    ok, pull_out = run_pull(path, tree_cfg.get("pullcmd"))
 
     parts = errors + ([pull_out] if pull_out else [])
     return ("ok" if ok else "failed"), ("\n".join(parts) or None)
@@ -331,8 +300,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
     exit_code = 0
     for path in failures:
         spawn_shell(path)
-        pull_remote = get_pull_remote(config, path)
-        success, output = git_pull(path, pull_remote)
+        pullcmd = get_tree_cfg(config, path).get("pullcmd")
+        success, output = run_pull(path, pullcmd)
         if success:
             print(f"{path.name}: {output or 'ok'}")
             log_entries.append((path.name, "ok", output or None))

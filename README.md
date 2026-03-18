@@ -15,7 +15,6 @@ An example config is provided in `vv.conf`.
 | Key | Default | Description |
 |-----|---------|-------------|
 | `basedir` | `~/src` | Directory whose immediate subdirectories are managed |
-| `remote` | `origin` | Remote name to pull from |
 | `jobs` | `4` | Number of parallel pulls |
 | `include` | *(none)* | List of repo paths to manage outside `basedir` |
 | `exclude` | *(none)* | List of `basedir` subdirectory names to skip |
@@ -32,25 +31,25 @@ targeting included repos that share a basename with a `basedir` repo.
 trees:
   ~/linux:          # matches the included ~/linux repo by path
     remotes: [linus]
-    remote: linus
+    pullcmd: "git fetch linus && git merge linus/master"
   linux:            # matches ~/src/linux (basedir repo) by name
-    remote: origin
+    pullcmd: "git pull --rebase origin"
 ```
 
 | Key (per-tree) | Description |
 |---|---|
 | `remotes` | List of remotes to fetch; defaults to all from `git remote` |
+| `pullcmd` | Shell command to run instead of `git pull`; defaults to a bare `git pull` using the branch's tracking remote |
 
 ## Commands
 
 ### `vv update`
 
-For each repository, first fetches all configured remotes in parallel (`jobs`
-workers), then pulls the tracking branch. Fetch remotes are taken from the
-per-tree `remotes` list if set, otherwise all remotes returned by `git remote`
-are fetched. The pull remote is resolved from the per-tree `remote` key, the
-branch's tracking remote, the top-level `remote` key, or `origin` (in that
-order). Dirty trees are skipped with a warning. Results are printed by the main
+For each repository, first fetches remotes, then runs the pull. Fetch remotes
+are taken from the per-tree `remotes` list if set, otherwise all remotes
+returned by `git remote` are fetched. The pull is a bare `git pull` by default
+(using the branch's tracking remote), or the per-tree `pullcmd` shell command if
+set. Dirty trees are skipped with a warning. Results are printed by the main
 thread as each update completes, avoiding interleaved output. If any pulls fail,
 an interactive shell is spawned in each affected tree (after all parallel updates
 finish) so the problem can be investigated; the pull is retried when the shell
