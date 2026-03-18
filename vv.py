@@ -209,6 +209,13 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
         if is_dirty(path, driver):
             print(path.name)
 
+    for path in sorted(get_include(config), key=lambda p: p.name):
+        driver = detect_vcs(path)
+        if driver is None:
+            continue
+        if is_dirty(path, driver):
+            print(path)
+
     return 0
 
 
