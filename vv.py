@@ -120,7 +120,7 @@ def get_all_remotes(path: Path) -> list[str]:
 
 def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
     result = subprocess.run(
-        ["git", "fetch", remote],
+        ["git", "fetch", "--verbose", remote],
         cwd=path,
         capture_output=True,
         text=True,
@@ -362,6 +362,7 @@ def _update_worker(repo: Repo) -> tuple[str, str | None]:
     if is_dirty(repo.path, repo.driver):
         return "dirty", None
 
+    fetch_outputs = []
     errors = []
     if repo.driver.name == "git":
         fetch_remotes = repo.tree_cfg.get("remotes") or get_all_remotes(repo.path)
@@ -369,10 +370,12 @@ def _update_worker(repo: Repo) -> tuple[str, str | None]:
             ok, out = git_fetch(repo.path, remote)
             if not ok and out:
                 errors.append(f"fetch {remote}: {out}")
+            elif out:
+                fetch_outputs.append(f"fetch {remote}: {out}")
 
     ok, pull_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
 
-    parts = errors + ([pull_out] if pull_out else [])
+    parts = fetch_outputs + errors + ([pull_out] if pull_out else [])
     return ("ok" if ok else "failed"), ("\n".join(parts) or None)
 
 
