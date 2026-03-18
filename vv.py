@@ -335,13 +335,13 @@ def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None) -> t
 
 
 def write_log(entries: list[tuple[str, str, str | None]]) -> None:
-    """Append an update run to the log file.
+    """Write the most recent update run to the log file.
 
     Each entry is (tree_name, status, detail) where detail may be None.
     Status values: 'ok', 'dirty', 'failed'.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with LOG_FILE.open("a") as f:
+    with LOG_FILE.open("w") as f:
         f.write(f"[{timestamp}]\n")
         for name, status, detail in entries:
             f.write(f"  {name}: {status}\n")
