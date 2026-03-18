@@ -107,6 +107,26 @@ def cmd_exclude(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dirty(_args: argparse.Namespace) -> int:
+    config = load_config()
+    basedir = get_basedir(config)
+    exclude = get_exclude(config)
+
+    if not basedir.is_dir():
+        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+        return 1
+
+    for path in sorted(p for p in basedir.iterdir() if p.is_dir()):
+        if path.name in exclude:
+            continue
+        if not is_git_repo(path):
+            continue
+        if is_dirty(path):
+            print(path.name)
+
+    return 0
+
+
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
@@ -153,6 +173,7 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("update", help="Pull all clean repositories under basedir")
+    sub.add_parser("dirty", help="List repositories with uncommitted changes")
 
     p_exclude = sub.add_parser("exclude", help="Add a directory to the exclude list")
     p_exclude.add_argument("path", help="Directory name or path to exclude")
@@ -164,6 +185,7 @@ def main() -> int:
 
     dispatch = {
         "update": cmd_update,
+        "dirty": cmd_dirty,
         "exclude": cmd_exclude,
     }
     return dispatch[args.command](args)
