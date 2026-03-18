@@ -26,3 +26,8 @@ python3 -m py_compile vv.py  # syntax check
 ```
 
 No test suite. Validate changes manually against a real basedir.
+
+## Workflow
+
+- Break changes into logical git commits (one concern per commit).
+- Keep `README.md` up to date when changing program behavior (commands, config, flags, etc.).
