@@ -43,7 +43,11 @@ def save_config(config: dict) -> None:
         yaml.dump(config, f, default_flow_style=False)
 
 
-def get_remote(config: dict) -> str:
+def get_remote(config: dict, tree_name: str | None = None) -> str:
+    if tree_name:
+        tree_cfg = (config.get("trees") or {}).get(tree_name) or {}
+        if tree_cfg.get("remote"):
+            return tree_cfg["remote"]
     return config.get("remote") or DEFAULT_REMOTE
 
 
@@ -154,8 +158,6 @@ def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
     exclude = get_exclude(config)
-    remote = get_remote(config)
-
     if not basedir.is_dir():
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
         return 1
@@ -174,6 +176,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
         if is_dirty(path):
             print(f"{path.name}: skipped (dirty)")
             continue
+        remote = get_remote(config, path.name)
         success, output = git_pull(path, remote)
         if success:
             print(f"{path.name}: {output or 'ok'}")
