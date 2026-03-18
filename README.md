@@ -16,6 +16,7 @@ An example config is provided in `vv.conf`.
 |-----|---------|-------------|
 | `basedir` | `~/src` | Directory whose immediate subdirectories are managed |
 | `remote` | `origin` | Remote name to pull from |
+| `jobs` | `4` | Number of parallel pulls |
 | `exclude` | *(none)* | List of subdirectory names to skip |
 | `trees` | *(none)* | Per-tree overrides (see below) |
 
@@ -33,10 +34,12 @@ trees:
 
 ### `vv update`
 
-Iterates all git repositories under `basedir` (excluding those in `exclude`)
-and runs `git pull <remote>` on each clean tree. Dirty trees are skipped with
-a warning. If a pull fails, an interactive shell is spawned in that tree so
-the problem can be investigated; the pull is retried when the shell exits.
+Pulls all git repositories under `basedir` (excluding those in `exclude`) in
+parallel (`jobs` workers). Dirty trees are skipped with a warning. All output
+is emitted from the main thread in sorted order once the pulls complete. If
+any pulls fail, an interactive shell is spawned in each affected tree (after
+all parallel pulls finish) so the problem can be investigated; the pull is
+retried when the shell exits.
 
 Results are appended to `~/.vv.log`.
 

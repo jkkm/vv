@@ -18,6 +18,7 @@ import os
 import sys
 import subprocess
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -31,6 +32,7 @@ CONFIG_FILE = Path.home() / ".vv.conf"
 LOG_FILE = Path.home() / ".vv.log"
 DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_REMOTE = "origin"
+DEFAULT_JOBS = 4
 
 
 def load_config() -> dict:
@@ -43,6 +45,10 @@ def load_config() -> dict:
 def save_config(config: dict) -> None:
     with CONFIG_FILE.open("w") as f:
         yaml.dump(config, f, default_flow_style=False)
+
+
+def get_jobs(config: dict) -> int:
+    return int(config.get("jobs") or DEFAULT_JOBS)
 
 
 def get_remote(config: dict, tree_name: str | None = None) -> str:
@@ -173,30 +179,59 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
+def _pull_worker(path: Path, remote: str) -> tuple[str, str | None]:
+    """Thread worker: returns (status, output). Does not print anything."""
+    if is_dirty(path):
+        return "dirty", None
+    success, output = git_pull(path, remote)
+    return ("ok" if success else "failed"), (output or None)
+
+
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
     exclude = get_exclude(config)
+    jobs = get_jobs(config)
+
     if not basedir.is_dir():
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
         return 1
 
-    subdirs = sorted(p for p in basedir.iterdir() if p.is_dir())
-    if not subdirs:
-        print(f"no subdirectories found in {basedir}")
+    repos = sorted(
+        p for p in basedir.iterdir()
+        if p.is_dir() and p.name not in exclude and is_git_repo(p)
+    )
+    if not repos:
+        print(f"no repositories found in {basedir}")
         return 0
 
-    exit_code = 0
+    # Pull all repos in parallel; collect results in sorted order
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            path: executor.submit(_pull_worker, path, get_remote(config, path.name))
+            for path in repos
+        }
+    results = {path: fut.result() for path, fut in futures.items()}
+
+    # Emit output from main thread in order; collect failures for later
     log_entries: list[tuple[str, str, str | None]] = []
-    for path in subdirs:
-        if path.name in exclude:
-            continue
-        if not is_git_repo(path):
-            continue
-        if is_dirty(path):
+    failures: list[Path] = []
+    for path in repos:
+        status, output = results[path]
+        if status == "dirty":
             print(f"{path.name}: skipped (dirty)")
             log_entries.append((path.name, "dirty", None))
-            continue
+        elif status == "ok":
+            print(f"{path.name}: {output or 'ok'}")
+            log_entries.append((path.name, "ok", output))
+        else:
+            print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
+            failures.append(path)
+
+    # Handle failures interactively once all pulls are done
+    exit_code = 0
+    for path in failures:
+        spawn_shell(path)
         remote = get_remote(config, path.name)
         success, output = git_pull(path, remote)
         if success:
@@ -204,15 +239,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
             log_entries.append((path.name, "ok", output or None))
         else:
             print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
-            spawn_shell(path)
-            success, output = git_pull(path, remote)
-            if success:
-                print(f"{path.name}: {output or 'ok'}")
-                log_entries.append((path.name, "ok", output or None))
-            else:
-                print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
-                log_entries.append((path.name, "failed", output or None))
-                exit_code = 1
+            log_entries.append((path.name, "failed", output or None))
+            exit_code = 1
 
     if log_entries:
         write_log(log_entries)
