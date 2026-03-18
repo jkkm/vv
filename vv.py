@@ -252,8 +252,6 @@ def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
     """Thread worker: fetch all remotes then pull. Returns (status, output)."""
     tree_cfg = get_tree_cfg(config, path)
     driver = get_vcs_driver(config, path)
-    if driver is None:
-        return "skip", None
     if is_dirty(path, driver):
         return "dirty", None
 
@@ -285,7 +283,10 @@ def cmd_update(_args: argparse.Namespace) -> int:
         p for p in basedir.iterdir()
         if p.is_dir() and p.name not in exclude and get_vcs_driver(config, p) is not None
     )
-    included_repos = [p for p in get_include(config) if p not in basedir_repos]
+    included_repos = [
+        p for p in get_include(config)
+        if p not in basedir_repos and p.is_dir() and get_vcs_driver(config, p) is not None
+    ]
     repos = basedir_repos + included_repos
     if not repos:
         print(f"no repositories found in {basedir}")
