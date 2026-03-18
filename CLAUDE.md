@@ -4,7 +4,7 @@ Multi-VCS source tree updater. Single-file Python (`vv.py`), one dependency (PyY
 
 ## What it does
 
-Keeps a collection of source repos up to date with upstream. Points at a basedir (default `~/src`), autodetects VCS (git, hg, svn, cvs), and manages repos found there plus explicitly included paths.
+Keeps a collection of source repos up to date with upstream. Scans multiple basedirs for repos, autodetects VCS (git, hg, svn, cvs), and manages repos found there plus explicitly included paths.
 
 ## Commands
 
@@ -16,7 +16,7 @@ Keeps a collection of source repos up to date with upstream. Points at a basedir
 
 ## Config
 
-`~/.vv.conf` (YAML). Keys: `basedir`, `jobs`, `exclude`, `include`, `trees` (per-repo overrides for `type`, `remotes`, `updatecmd`).
+`~/.vv.conf` (YAML). Top-level keys: `basedirs` (dict of paths, each with optional `exclude` and `trees`), `jobs`, `include` (dict of path → tree config). Per-tree keys: `type`, `remotes`, `updatecmd`.
 
 ## Development
 

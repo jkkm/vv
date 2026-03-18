@@ -12,35 +12,61 @@ A simple tool to keep a collection of source repositories up to date with upstre
 `vv` reads `~/.vv.conf` on startup. If the file is absent, defaults are used.
 An example config is provided in `vv.conf`.
 
+```yaml
+jobs: 4
+
+basedirs:
+  ~/src:
+    exclude: [vv]
+    trees:
+      linux:
+        remotes: [upstream, origin]
+  ~/work:
+    trees:
+      project-x:
+        updatecmd: "make update"
+
+include:
+  ~/other/repo:
+    type: git
+    updatecmd: "custom cmd"
+  ~/simple/repo:
+```
+
+### Top-level keys
+
 | Key | Default | Description |
 |-----|---------|-------------|
-| `basedir` | `~/src` | Directory whose immediate subdirectories are managed |
+| `basedirs` | *(none)* | Dict of directory paths to scan for repos (see below) |
 | `jobs` | `4` | Number of parallel pulls |
-| `include` | *(none)* | List of repo paths to manage outside `basedir` |
-| `exclude` | *(none)* | List of `basedir` subdirectory names to skip |
-| `trees` | *(none)* | Per-tree overrides (see below) |
+| `include` | *(none)* | Dict of repo paths to manage outside any basedir (see below) |
+
+### Per-basedir keys
+
+Each key under `basedirs` is a directory path whose immediate subdirectories
+are managed. The value is a dict with optional keys:
+
+| Key | Description |
+|-----|-------------|
+| `exclude` | List of subdirectory names to skip |
+| `trees` | Dict of per-tree overrides, keyed by basename (see below) |
 
 ### Per-tree overrides
 
-Any top-level key can be overridden for a specific tree under `trees`. Keys are
-matched by basename, or by resolved filesystem path when the key starts with `/`
-or `~`. Path-based keys take priority over name-based keys, and are useful for
-targeting included repos that share a basename with a `basedir` repo.
+Tree config can appear under `basedirs.<path>.trees.<name>` for basedir repos,
+or inline as the value under `include.<path>` for standalone repos.
 
-```yaml
-trees:
-  ~/linux:          # matches the included ~/linux repo by path
-    remotes: [linus]
-    updatecmd: "git fetch linus && git merge linus/master"
-  linux:            # matches ~/src/linux (basedir repo) by name
-    updatecmd: "git pull --rebase origin"
-```
-
-| Key (per-tree) | Description |
-|---|---|
+| Key | Description |
+|-----|-------------|
 | `type` | VCS type (`git`, `hg`, `svn`, `cvs`); autodetected from directory markers (`.git`, `.hg`, `.svn`, `CVS`) when absent |
 | `remotes` | List of remotes to fetch before pulling; defaults to all from `git remote` (git only) |
 | `updatecmd` | Shell command to run instead of the default update command for the VCS |
+
+### Include
+
+`include` is a dict of paths to standalone repos not under any basedir. Each
+key is an absolute path; the value is a tree config dict (same keys as
+per-tree overrides), or `null`/empty for defaults.
 
 ## Commands
 
@@ -58,21 +84,26 @@ investigated; the pull is retried when the shell exits.
 
 Results are appended to `~/.vv.log`.
 
+### `vv list`
+
+Lists all managed repositories from all basedirs plus includes.
+
 ### `vv dirty`
 
-Lists repositories with uncommitted changes. Checks all repos under `basedir`
-plus any in the `include` list. Works with all supported VCS types.
+Lists repositories with uncommitted changes. Checks all repos under all
+basedirs plus any in the `include` dict. Works with all supported VCS types.
 
 ### `vv include <path>`
 
-Adds a repository to the `include` list in `~/.vv.conf`. The path may be
-anywhere on the filesystem, not just under `basedir`. Accepts any supported
+Adds a repository to the `include` dict in `~/.vv.conf`. The path may be
+anywhere on the filesystem, not just under a basedir. Accepts any supported
 VCS type.
 
 ### `vv exclude <path>`
 
-Adds a directory to the `exclude` list in `~/.vv.conf`. Accepts a bare name
-or a path; the target must be a direct subdirectory of `basedir`.
+Adds a directory to the `exclude` list for its parent basedir in `~/.vv.conf`.
+Accepts a bare name or a path; the target must be a direct subdirectory of a
+configured basedir.
 
 ## License
 

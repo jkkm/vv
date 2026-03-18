@@ -32,7 +32,6 @@ except ImportError:
 
 CONFIG_FILE = Path.home() / ".vv.conf"
 LOG_FILE = Path.home() / ".vv.log"
-DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
 
 
@@ -58,6 +57,45 @@ def load_config() -> dict:
         return {}
     with CONFIG_FILE.open() as f:
         return yaml.safe_load(f) or {}
+
+
+def validate_config(config: dict) -> None:
+    """Exit with a clear error if the config uses the old single-basedir format."""
+    old_keys = []
+    if "basedir" in config:
+        old_keys.append("basedir")
+    if "exclude" in config and isinstance(config["exclude"], list):
+        old_keys.append("exclude (top-level list)")
+    if "trees" in config and not any(
+        isinstance(config.get("basedirs", {}).get(k), dict)
+        for k in (config.get("basedirs") or {})
+    ):
+        if "basedirs" not in config:
+            old_keys.append("trees (top-level)")
+    if "include" in config and isinstance(config["include"], list):
+        old_keys.append("include (list)")
+    if not old_keys:
+        return
+    print(
+        "error: ~/.vv.conf uses the old config format.\n"
+        f"  Detected old-format keys: {', '.join(old_keys)}\n"
+        "\n"
+        "  The new format uses 'basedirs' (plural) with per-basedir settings:\n"
+        "\n"
+        "    basedirs:\n"
+        "      ~/src:\n"
+        "        exclude: [dirname]\n"
+        "        trees:\n"
+        "          reponame:\n"
+        "            remotes: [upstream, origin]\n"
+        "    include:\n"
+        "      ~/other/repo:\n"
+        "        type: git\n"
+        "\n"
+        "  See README.md for the full config reference.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def save_config(config: dict) -> None:
@@ -90,11 +128,9 @@ def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
     return result.returncode == 0, output
 
 
-def get_basedir(config: dict) -> Path:
-    raw = config.get("basedir")
-    if raw:
-        return Path(raw).expanduser()
-    return DEFAULT_BASEDIR
+def get_basedirs(config: dict) -> dict[Path, dict]:
+    raw = config.get("basedirs") or {}
+    return {Path(k).expanduser(): (v or {}) for k, v in raw.items()}
 
 
 def detect_vcs(path: Path) -> VcsDriver | None:
@@ -104,8 +140,8 @@ def detect_vcs(path: Path) -> VcsDriver | None:
     return None
 
 
-def get_vcs_driver(config: dict, path: Path) -> VcsDriver | None:
-    vcs_name = get_tree_cfg(config, path).get("type")
+def get_vcs_driver(tree_cfg: dict, path: Path) -> VcsDriver | None:
+    vcs_name = tree_cfg.get("type")
     if vcs_name:
         return _VCS_BY_NAME.get(vcs_name)
     return detect_vcs(path)
@@ -118,64 +154,68 @@ def is_dirty(path: Path, driver: VcsDriver) -> bool:
     return bool(result.stdout.strip())
 
 
-def get_exclude(config: dict) -> set[str]:
-    raw = config.get("exclude") or []
-    return set(raw)
+@dataclass
+class Repo:
+    path: Path
+    driver: VcsDriver
+    label: str
+    tree_cfg: dict
 
 
-def get_include(config: dict) -> list[Path]:
-    raw = config.get("include") or []
-    return [Path(p).expanduser() for p in raw]
+def get_include(config: dict) -> dict[Path, dict]:
+    raw = config.get("include") or {}
+    return {Path(k).expanduser(): (v or {}) for k, v in raw.items()}
 
 
-def repo_label(path: Path, basedir: Path) -> str:
-    """Short name for basedir repos, full path for included repos."""
-    if path.parent == basedir:
-        return path.name
-    return str(path)
-
-
-def require_basedir(config: dict) -> Path | None:
-    """Return basedir if it exists, or print an error and return None."""
-    basedir = get_basedir(config)
-    if not basedir.is_dir():
-        print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
+def require_basedirs(config: dict) -> dict[Path, dict] | None:
+    """Return basedirs dict if all exist, or print an error and return None."""
+    basedirs = get_basedirs(config)
+    if not basedirs:
+        print("error: no basedirs configured in ~/.vv.conf", file=sys.stderr)
         return None
-    return basedir
+    for path in basedirs:
+        if not path.is_dir():
+            print(f"error: basedir does not exist: {path}", file=sys.stderr)
+            return None
+    return basedirs
 
 
-def get_repos(config: dict) -> tuple[list[tuple[Path, VcsDriver]], list[tuple[Path, VcsDriver]]]:
-    """Return (basedir_repos, included_repos) with their VCS drivers, filtered and sorted."""
-    basedir = get_basedir(config)
-    exclude = get_exclude(config)
-    basedir_repos: list[tuple[Path, VcsDriver]] = []
-    basedir_paths: set[Path] = set()
-    for p in sorted(basedir.iterdir()):
-        if p.is_dir() and p.name not in exclude:
-            driver = get_vcs_driver(config, p)
-            if driver is not None:
-                basedir_repos.append((p, driver))
-                basedir_paths.add(p)
-    included_repos: list[tuple[Path, VcsDriver]] = []
-    for p in sorted(get_include(config), key=lambda p: p.name):
-        if p not in basedir_paths and p.is_dir():
-            driver = get_vcs_driver(config, p)
-            if driver is not None:
-                included_repos.append((p, driver))
-    return basedir_repos, included_repos
+def get_tree_cfg(basedir_section: dict | None, path: Path) -> dict:
+    """Look up per-tree config for a repo.
 
-
-def get_tree_cfg(config: dict, path: Path) -> dict:
-    trees = config.get("trees") or {}
-    resolved = path.resolve()
-    for key, val in trees.items():
-        if key.startswith("/") or key.startswith("~"):
-            try:
-                if Path(key).expanduser().resolve() == resolved:
-                    return val or {}
-            except Exception:
-                continue
+    For basedir repos, basedir_section is the basedir's config dict.
+    For include repos, pass None (config is inline in the include dict).
+    """
+    if basedir_section is None:
+        return {}
+    trees = basedir_section.get("trees") or {}
     return trees.get(path.name) or {}
+
+
+def get_repos(config: dict) -> list[Repo]:
+    """Return all managed repos from all basedirs plus includes."""
+    repos: list[Repo] = []
+    basedir_paths: set[Path] = set()
+
+    for basedir, section in sorted(get_basedirs(config).items()):
+        exclude = set(section.get("exclude") or [])
+        if not basedir.is_dir():
+            continue
+        for p in sorted(basedir.iterdir()):
+            if p.is_dir() and p.name not in exclude:
+                tree_cfg = get_tree_cfg(section, p)
+                driver = get_vcs_driver(tree_cfg, p)
+                if driver is not None:
+                    repos.append(Repo(p, driver, p.name, tree_cfg))
+                    basedir_paths.add(p)
+
+    for p, tree_cfg in sorted(get_include(config).items(), key=lambda x: x[0].name):
+        if p not in basedir_paths and p.is_dir():
+            driver = get_vcs_driver(tree_cfg, p)
+            if driver is not None:
+                repos.append(Repo(p, driver, str(p), tree_cfg))
+
+    return repos
 
 
 def cmd_include(args: argparse.Namespace) -> int:
@@ -187,11 +227,12 @@ def cmd_include(args: argparse.Namespace) -> int:
         print(f"error: no supported VCS found at: {path}", file=sys.stderr)
         return 1
     config = load_config()
-    include = list(config.get("include") or [])
+    validate_config(config)
+    include = config.get("include") or {}
     if str(path) in include:
         print(f"already included: {path}")
         return 0
-    include.append(str(path))
+    include[str(path)] = None
     config["include"] = include
     save_config(config)
     print(f"included: {path}")
@@ -200,57 +241,79 @@ def cmd_include(args: argparse.Namespace) -> int:
 
 def cmd_exclude(args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = get_basedir(config)
+    validate_config(config)
 
-    # Accept either a bare name or a full/relative path; resolve to check parentage
-    candidate = Path(args.path).expanduser()
-    if not candidate.is_absolute():
-        candidate = (basedir / candidate).resolve()
-    else:
-        candidate = candidate.resolve()
+    basedirs = get_basedirs(config)
+    candidate_path = Path(args.path).expanduser()
 
-    if candidate.parent != basedir.resolve():
+    # Find which basedir this path belongs to
+    owner = None
+    candidate = None
+    for basedir in basedirs:
+        if candidate_path.is_absolute():
+            full = candidate_path.resolve()
+        else:
+            full = (basedir / candidate_path).resolve()
+        if full.parent == basedir.resolve():
+            owner = basedir
+            candidate = full
+            break
+
+    if owner is None:
         print(
-            f"error: {candidate.name!r} is not a direct subdirectory of basedir ({basedir})",
+            f"error: {args.path!r} is not a direct subdirectory of any configured basedir",
             file=sys.stderr,
         )
         return 1
 
-    exclude = list(config.get("exclude") or [])
+    # Get the raw config key for this basedir
+    raw_basedirs = config.get("basedirs") or {}
+    raw_key = None
+    for k in raw_basedirs:
+        if Path(k).expanduser() == owner:
+            raw_key = k
+            break
+
+    if raw_key is None:
+        print(f"error: basedir {owner} not found in config", file=sys.stderr)
+        return 1
+
+    section = raw_basedirs[raw_key] or {}
+    exclude = list(section.get("exclude") or [])
     if candidate.name in exclude:
         print(f"already excluded: {candidate.name}")
         return 0
 
     exclude.append(candidate.name)
-    config["exclude"] = exclude
+    section["exclude"] = exclude
+    raw_basedirs[raw_key] = section
+    config["basedirs"] = raw_basedirs
     save_config(config)
-    print(f"excluded: {candidate.name}")
+    print(f"excluded: {candidate.name} (from {owner})")
     return 0
 
 
 def cmd_list(_args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = require_basedir(config)
-    if basedir is None:
+    validate_config(config)
+    if require_basedirs(config) is None:
         return 1
 
-    basedir_repos, included_repos = get_repos(config)
-    for path, driver in basedir_repos + included_repos:
-        print(f"{repo_label(path, basedir)} ({driver.name})")
+    for repo in get_repos(config):
+        print(f"{repo.label} ({repo.driver.name})")
 
     return 0
 
 
 def cmd_dirty(_args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = require_basedir(config)
-    if basedir is None:
+    validate_config(config)
+    if require_basedirs(config) is None:
         return 1
 
-    basedir_repos, included_repos = get_repos(config)
-    for path, driver in basedir_repos + included_repos:
-        if is_dirty(path, driver):
-            print(repo_label(path, basedir))
+    for repo in get_repos(config):
+        if is_dirty(repo.path, repo.driver):
+            print(repo.label)
 
     return 0
 
@@ -291,21 +354,20 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
-def _update_worker(path: Path, driver: VcsDriver, config: dict) -> tuple[str, str | None]:
+def _update_worker(repo: Repo) -> tuple[str, str | None]:
     """Thread worker: fetch all remotes then pull. Returns (status, output)."""
-    tree_cfg = get_tree_cfg(config, path)
-    if is_dirty(path, driver):
+    if is_dirty(repo.path, repo.driver):
         return "dirty", None
 
     errors = []
-    if driver.name == "git":
-        fetch_remotes = tree_cfg.get("remotes") or get_all_remotes(path)
+    if repo.driver.name == "git":
+        fetch_remotes = repo.tree_cfg.get("remotes") or get_all_remotes(repo.path)
         for remote in fetch_remotes:
-            ok, out = git_fetch(path, remote)
+            ok, out = git_fetch(repo.path, remote)
             if not ok and out:
                 errors.append(f"fetch {remote}: {out}")
 
-    ok, pull_out = run_update(path, driver, tree_cfg.get("updatecmd"))
+    ok, pull_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
 
     parts = errors + ([pull_out] if pull_out else [])
     return ("ok" if ok else "failed"), ("\n".join(parts) or None)
@@ -313,60 +375,54 @@ def _update_worker(path: Path, driver: VcsDriver, config: dict) -> tuple[str, st
 
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
-    basedir = require_basedir(config)
-    if basedir is None:
+    validate_config(config)
+    if require_basedirs(config) is None:
         return 1
     jobs = get_jobs(config)
 
-    basedir_repos, included_repos = get_repos(config)
-    repos = basedir_repos + included_repos
+    repos = get_repos(config)
     if not repos:
-        print(f"no repositories found in {basedir}")
+        print("no repositories found")
         return 0
 
-    # Workers push results into a queue; main thread prints them as they arrive
     result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
-    def worker(path: Path, driver: VcsDriver, config: dict) -> None:
-        status, output = _update_worker(path, driver, config)
-        result_queue.put((path, status, output))
+    def worker(repo: Repo) -> None:
+        status, output = _update_worker(repo)
+        result_queue.put((repo, status, output))
 
     log_entries: list[tuple[str, str, str | None]] = []
-    failures: list[Path] = []
+    failures: list[Repo] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
-        for path, driver in repos:
-            executor.submit(worker, path, driver, config)
+        for repo in repos:
+            executor.submit(worker, repo)
         for _ in repos:
-            path, status, output = result_queue.get()
-            label = repo_label(path, basedir)
+            repo, status, output = result_queue.get()
             if status == "dirty":
-                print(f"{label}: skipped (dirty)")
-                log_entries.append((label, "dirty", None))
+                print(f"{repo.label}: skipped (dirty)")
+                log_entries.append((repo.label, "dirty", None))
             elif status == "ok":
-                print(f"{label}: {output or 'ok'}")
-                log_entries.append((label, "ok", output))
+                print(f"{repo.label}: {output or 'ok'}")
+                log_entries.append((repo.label, "ok", output))
             else:
-                print(f"{label}: pull failed\n  {output}", file=sys.stderr)
-                failures.append(path)
+                print(f"{repo.label}: pull failed\n  {output}", file=sys.stderr)
+                failures.append(repo)
 
-    # Handle failures interactively once all pulls are done
     exit_code = 0
-    for path in failures:
-        label = repo_label(path, basedir)
-        spawn_shell(path)
-        driver = get_vcs_driver(config, path)
+    for repo in failures:
+        spawn_shell(repo.path)
+        driver = detect_vcs(repo.path)
         if driver is None:
-            log_entries.append((label, "failed", "VCS marker gone"))
+            log_entries.append((repo.label, "failed", "VCS marker gone"))
             exit_code = 1
             continue
-        updatecmd = get_tree_cfg(config, path).get("updatecmd")
-        success, output = run_update(path, driver, updatecmd)
+        success, output = run_update(repo.path, driver, repo.tree_cfg.get("updatecmd"))
         if success:
-            print(f"{label}: {output or 'ok'}")
-            log_entries.append((label, "ok", output or None))
+            print(f"{repo.label}: {output or 'ok'}")
+            log_entries.append((repo.label, "ok", output or None))
         else:
-            print(f"{label}: pull failed\n  {output}", file=sys.stderr)
-            log_entries.append((label, "failed", output or None))
+            print(f"{repo.label}: pull failed\n  {output}", file=sys.stderr)
+            log_entries.append((repo.label, "failed", output or None))
             exit_code = 1
 
     if log_entries:
