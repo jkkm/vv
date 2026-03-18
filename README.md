@@ -37,7 +37,7 @@ include:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `basedirs` | *(none)* | Dict of directory paths to scan for repos (see below) |
+| `basedirs` | `~/src` | Dict of directory paths to scan for repos (see below) |
 | `jobs` | `4` | Number of parallel pulls |
 | `include` | *(none)* | Dict of repo paths to manage outside any basedir (see below) |
 

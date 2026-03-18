@@ -32,6 +32,7 @@ except ImportError:
 
 CONFIG_FILE = Path.home() / ".vv.conf"
 LOG_FILE = Path.home() / ".vv.log"
+DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
 
 
@@ -130,6 +131,8 @@ def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
 
 def get_basedirs(config: dict) -> dict[Path, dict]:
     raw = config.get("basedirs") or {}
+    if not raw:
+        return {DEFAULT_BASEDIR: {}}
     return {Path(k).expanduser(): (v or {}) for k, v in raw.items()}
 
 
