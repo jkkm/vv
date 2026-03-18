@@ -67,9 +67,15 @@ def is_dirty(path: Path) -> bool:
     return bool(tracked_changes)
 
 
+def get_exclude(config: dict) -> set[str]:
+    raw = config.get("exclude") or []
+    return set(raw)
+
+
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     basedir = get_basedir(config)
+    exclude = get_exclude(config)
 
     if not basedir.is_dir():
         print(f"error: basedir does not exist: {basedir}", file=sys.stderr)
@@ -82,6 +88,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
 
     exit_code = 0
     for path in subdirs:
+        if path.name in exclude:
+            continue
         if not is_git_repo(path):
             continue
         if is_dirty(path):
