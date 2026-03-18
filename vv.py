@@ -128,6 +128,13 @@ def get_include(config: dict) -> list[Path]:
     return [Path(p).expanduser() for p in raw]
 
 
+def repo_label(path: Path, basedir: Path) -> str:
+    """Short name for basedir repos, full path for included repos."""
+    if path.parent == basedir:
+        return path.name
+    return str(path)
+
+
 def get_repos(config: dict) -> tuple[list[Path], list[Path]]:
     """Return (basedir_repos, included_repos), filtered and sorted."""
     basedir = get_basedir(config)
@@ -317,33 +324,35 @@ def cmd_update(_args: argparse.Namespace) -> int:
             executor.submit(worker, path, config)
         for _ in repos:
             path, status, output = result_queue.get()
+            label = repo_label(path, basedir)
             if status == "dirty":
-                print(f"{path.name}: skipped (dirty)")
-                log_entries.append((path.name, "dirty", None))
+                print(f"{label}: skipped (dirty)")
+                log_entries.append((label, "dirty", None))
             elif status == "ok":
-                print(f"{path.name}: {output or 'ok'}")
-                log_entries.append((path.name, "ok", output))
+                print(f"{label}: {output or 'ok'}")
+                log_entries.append((label, "ok", output))
             else:
-                print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
+                print(f"{label}: pull failed\n  {output}", file=sys.stderr)
                 failures.append(path)
 
     # Handle failures interactively once all pulls are done
     exit_code = 0
     for path in failures:
+        label = repo_label(path, basedir)
         spawn_shell(path)
         driver = get_vcs_driver(config, path)
         if driver is None:
-            log_entries.append((path.name, "failed", "VCS marker gone"))
+            log_entries.append((label, "failed", "VCS marker gone"))
             exit_code = 1
             continue
         pullcmd = get_tree_cfg(config, path).get("pullcmd")
         success, output = run_pull(path, driver, pullcmd)
         if success:
-            print(f"{path.name}: {output or 'ok'}")
-            log_entries.append((path.name, "ok", output or None))
+            print(f"{label}: {output or 'ok'}")
+            log_entries.append((label, "ok", output or None))
         else:
-            print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
-            log_entries.append((path.name, "failed", output or None))
+            print(f"{label}: pull failed\n  {output}", file=sys.stderr)
+            log_entries.append((label, "failed", output or None))
             exit_code = 1
 
     if log_entries:
