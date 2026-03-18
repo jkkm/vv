@@ -31,7 +31,7 @@ except ImportError:
     sys.exit(1)
 
 CONFIG_FILE = Path.home() / ".vv.conf"
-LOG_FILE = Path.home() / ".vv.log"
+DEFAULT_LOG_FILE = Path.home() / ".vv.log"
 DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
 
@@ -106,6 +106,11 @@ def save_config(config: dict) -> None:
 
 def get_jobs(config: dict) -> int:
     return int(config.get("jobs") or DEFAULT_JOBS)
+
+
+def get_log_file(config: dict) -> Path:
+    raw = config.get("logfile")
+    return Path(raw).expanduser() if raw else DEFAULT_LOG_FILE
 
 
 def get_all_remotes(path: Path) -> list[str]:
@@ -334,14 +339,14 @@ def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None) -> t
     return result.returncode == 0, output
 
 
-def write_log(entries: list[tuple[str, str, str | None]]) -> None:
+def write_log(log_file: Path, entries: list[tuple[str, str, str | None]]) -> None:
     """Write the most recent update run to the log file.
 
     Each entry is (tree_name, status, detail) where detail may be None.
     Status values: 'ok', 'dirty', 'failed'.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with LOG_FILE.open("w") as f:
+    with log_file.open("w") as f:
         f.write(f"[{timestamp}]\n")
         for name, status, detail in entries:
             f.write(f"  {name}: {status}\n")
@@ -432,7 +437,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
             exit_code = 1
 
     if log_entries:
-        write_log(log_entries)
+        write_log(get_log_file(config), log_entries)
 
     return exit_code
 
