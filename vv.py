@@ -362,10 +362,14 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
-def _update_worker(repo: Repo) -> tuple[str, str | None]:
-    """Thread worker: fetch all remotes then pull. Returns (status, output)."""
+def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
+    """Thread worker: fetch all remotes then pull.
+
+    Returns (status, display_output, log_detail) where display_output is
+    shown to the user and log_detail is the full output written to the log.
+    """
     if is_dirty(repo.path, repo.driver):
-        return "dirty", None
+        return "dirty", None, None
 
     fetch_outputs = []
     errors = []
@@ -380,8 +384,12 @@ def _update_worker(repo: Repo) -> tuple[str, str | None]:
 
     ok, pull_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
 
-    parts = fetch_outputs + errors + ([pull_out] if pull_out else [])
-    return ("ok" if ok else "failed"), ("\n".join(parts) or None)
+    status = "ok" if ok else "failed"
+    display_parts = errors + ([pull_out] if pull_out else [])
+    display = "\n".join(display_parts) or None
+    log_parts = fetch_outputs + display_parts
+    log_detail = "\n".join(log_parts) or None
+    return status, display, log_detail
 
 
 def cmd_update(_args: argparse.Namespace) -> int:
@@ -399,8 +407,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
     result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
     def worker(repo: Repo) -> None:
-        status, output = _update_worker(repo)
-        result_queue.put((repo, status, output))
+        status, display, log_detail = _update_worker(repo)
+        result_queue.put((repo, status, display, log_detail))
 
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[Repo] = []
@@ -408,15 +416,15 @@ def cmd_update(_args: argparse.Namespace) -> int:
         for repo in repos:
             executor.submit(worker, repo)
         for _ in repos:
-            repo, status, output = result_queue.get()
+            repo, status, display, log_detail = result_queue.get()
             if status == "dirty":
                 print(f"{repo.label}: skipped (dirty)")
                 log_entries.append((repo.label, "dirty", None))
             elif status == "ok":
-                print(f"{repo.label}: {output or 'ok'}")
-                log_entries.append((repo.label, "ok", output))
+                print(f"{repo.label}: {display or 'ok'}")
+                log_entries.append((repo.label, "ok", log_detail))
             else:
-                print(f"{repo.label}: pull failed\n  {output}", file=sys.stderr)
+                print(f"{repo.label}: pull failed\n  {display}", file=sys.stderr)
                 failures.append(repo)
 
     exit_code = 0
