@@ -457,7 +457,7 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("list", help="List managed repositories")
-    sub.add_parser("update", help="Pull all clean repositories")
+    sub.add_parser("update", help="Update all clean repositories (default)")
     sub.add_parser("dirty", help="List repositories with uncommitted changes")
 
     p_include = sub.add_parser("include", help="Explicitly include a repository")
@@ -468,8 +468,7 @@ def main() -> int:
 
     args = parser.parse_args()
     if args.command is None:
-        parser.print_help()
-        return 1
+        args.command = "update"
 
     dispatch = {
         "list": cmd_list,
