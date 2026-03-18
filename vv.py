@@ -36,6 +36,11 @@ def load_config() -> dict:
         return yaml.safe_load(f) or {}
 
 
+def save_config(config: dict) -> None:
+    with CONFIG_FILE.open("w") as f:
+        yaml.dump(config, f, default_flow_style=False)
+
+
 def get_basedir(config: dict) -> Path:
     raw = config.get("basedir")
     if raw:
@@ -70,6 +75,36 @@ def is_dirty(path: Path) -> bool:
 def get_exclude(config: dict) -> set[str]:
     raw = config.get("exclude") or []
     return set(raw)
+
+
+def cmd_exclude(args: argparse.Namespace) -> int:
+    config = load_config()
+    basedir = get_basedir(config)
+
+    # Accept either a bare name or a full/relative path; resolve to check parentage
+    candidate = Path(args.path).expanduser()
+    if not candidate.is_absolute():
+        candidate = (basedir / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+
+    if candidate.parent != basedir.resolve():
+        print(
+            f"error: {candidate.name!r} is not a direct subdirectory of basedir ({basedir})",
+            file=sys.stderr,
+        )
+        return 1
+
+    exclude = list(config.get("exclude") or [])
+    if candidate.name in exclude:
+        print(f"already excluded: {candidate.name}")
+        return 0
+
+    exclude.append(candidate.name)
+    config["exclude"] = exclude
+    save_config(config)
+    print(f"excluded: {candidate.name}")
+    return 0
 
 
 def cmd_update(_args: argparse.Namespace) -> int:
@@ -119,12 +154,19 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("update", help="Pull all clean repositories under basedir")
 
+    p_exclude = sub.add_parser("exclude", help="Add a directory to the exclude list")
+    p_exclude.add_argument("path", help="Directory name or path to exclude")
+
     args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         return 1
 
-    return cmd_update(args)
+    dispatch = {
+        "update": cmd_update,
+        "exclude": cmd_exclude,
+    }
+    return dispatch[args.command](args)
 
 
 if __name__ == "__main__":
