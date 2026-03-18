@@ -23,15 +23,18 @@ An example config is provided in `vv.conf`.
 
 ### Per-tree overrides
 
-Any top-level key can be overridden for a specific tree under `trees`:
+Any top-level key can be overridden for a specific tree under `trees`. Keys are
+matched by basename, or by resolved filesystem path when the key starts with `/`
+or `~`. Path-based keys take priority over name-based keys, and are useful for
+targeting included repos that share a basename with a `basedir` repo.
 
 ```yaml
 trees:
-  linux:
-    remote: upstream
-    remotes:
-      - upstream
-      - origin
+  ~/linux:          # matches the included ~/linux repo by path
+    remotes: [linus]
+    remote: linus
+  linux:            # matches ~/src/linux (basedir repo) by name
+    remote: origin
 ```
 
 | Key (per-tree) | Description |

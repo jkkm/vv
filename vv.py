@@ -95,7 +95,7 @@ def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
 
 
 def get_pull_remote(config: dict, path: Path) -> str:
-    tree_cfg = (config.get("trees") or {}).get(path.name) or {}
+    tree_cfg = get_tree_cfg(config, path)
     if tree_cfg.get("remote"):
         return tree_cfg["remote"]
     branch_remote = get_branch_remote(path)
@@ -143,6 +143,19 @@ def get_exclude(config: dict) -> set[str]:
 def get_include(config: dict) -> list[Path]:
     raw = config.get("include") or []
     return [Path(p).expanduser() for p in raw]
+
+
+def get_tree_cfg(config: dict, path: Path) -> dict:
+    trees = config.get("trees") or {}
+    resolved = path.resolve()
+    for key, val in trees.items():
+        if key.startswith("/") or key.startswith("~"):
+            try:
+                if Path(key).expanduser().resolve() == resolved:
+                    return val or {}
+            except Exception:
+                continue
+    return trees.get(path.name) or {}
 
 
 def cmd_include(args: argparse.Namespace) -> int:
@@ -254,7 +267,7 @@ def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
     if is_dirty(path):
         return "dirty", None
 
-    tree_cfg = (config.get("trees") or {}).get(path.name) or {}
+    tree_cfg = get_tree_cfg(config, path)
     fetch_remotes = tree_cfg.get("remotes") or get_all_remotes(path)
 
     errors = []
