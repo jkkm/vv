@@ -41,7 +41,7 @@ class VcsDriver:
     name: str
     marker: str               # subdirectory/file that identifies this VCS
     dirty_cmd: tuple[str, ...]  # produces output iff repo is dirty
-    update_cmd: tuple[str, ...]  # default update command (no pullcmd set)
+    update_cmd: tuple[str, ...]  # default update command
 
 
 VCS_DRIVERS: list[VcsDriver] = [
@@ -238,10 +238,10 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     return 0
 
 
-def run_pull(path: Path, driver: VcsDriver, pullcmd: str | None = None) -> tuple[bool, str]:
-    if pullcmd:
+def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None) -> tuple[bool, str]:
+    if updatecmd:
         result = subprocess.run(
-            pullcmd, shell=True, cwd=path, capture_output=True, text=True
+            updatecmd, shell=True, cwd=path, capture_output=True, text=True
         )
     else:
         result = subprocess.run(
@@ -289,7 +289,7 @@ def _update_worker(path: Path, config: dict) -> tuple[str, str | None]:
             if not ok and out:
                 errors.append(f"fetch {remote}: {out}")
 
-    ok, pull_out = run_pull(path, driver, tree_cfg.get("pullcmd"))
+    ok, pull_out = run_update(path, driver, tree_cfg.get("updatecmd"))
 
     parts = errors + ([pull_out] if pull_out else [])
     return ("ok" if ok else "failed"), ("\n".join(parts) or None)
@@ -345,8 +345,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
             log_entries.append((label, "failed", "VCS marker gone"))
             exit_code = 1
             continue
-        pullcmd = get_tree_cfg(config, path).get("pullcmd")
-        success, output = run_pull(path, driver, pullcmd)
+        updatecmd = get_tree_cfg(config, path).get("updatecmd")
+        success, output = run_update(path, driver, updatecmd)
         if success:
             print(f"{label}: {output or 'ok'}")
             log_entries.append((label, "ok", output or None))

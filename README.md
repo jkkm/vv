@@ -31,16 +31,16 @@ targeting included repos that share a basename with a `basedir` repo.
 trees:
   ~/linux:          # matches the included ~/linux repo by path
     remotes: [linus]
-    pullcmd: "git fetch linus && git merge linus/master"
+    updatecmd: "git fetch linus && git merge linus/master"
   linux:            # matches ~/src/linux (basedir repo) by name
-    pullcmd: "git pull --rebase origin"
+    updatecmd: "git pull --rebase origin"
 ```
 
 | Key (per-tree) | Description |
 |---|---|
 | `type` | VCS type (`git`, `hg`, `svn`, `cvs`); autodetected from directory markers (`.git`, `.hg`, `.svn`, `CVS`) when absent |
 | `remotes` | List of remotes to fetch before pulling; defaults to all from `git remote` (git only) |
-| `pullcmd` | Shell command to run instead of the default update command for the VCS |
+| `updatecmd` | Shell command to run instead of the default update command for the VCS |
 
 ## Commands
 
@@ -50,7 +50,7 @@ For each repository, runs the appropriate update command for its VCS. For git
 repos, all remotes are fetched first (or the per-tree `remotes` list if set);
 this pre-fetch step is git-only. The update command defaults to the VCS
 default (`git pull`, `hg pull -u`, `svn update`, `cvs update`), or the
-per-tree `pullcmd` shell command if set. Dirty trees are skipped with a
+per-tree `updatecmd` shell command if set. Dirty trees are skipped with a
 warning. Results are printed by the main thread as each update completes,
 avoiding interleaved output. If any pulls fail, an interactive shell is spawned
 in each affected tree (after all parallel updates finish) so the problem can be
