@@ -18,6 +18,7 @@ import os
 import sys
 import subprocess
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -27,6 +28,7 @@ except ImportError:
     sys.exit(1)
 
 CONFIG_FILE = Path.home() / ".vv.conf"
+LOG_FILE = Path.home() / ".vv.log"
 DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_REMOTE = "origin"
 
@@ -148,6 +150,23 @@ def git_pull(path: Path, remote: str) -> tuple[bool, str]:
     return result.returncode == 0, output
 
 
+def write_log(entries: list[tuple[str, str, str | None]]) -> None:
+    """Append an update run to the log file.
+
+    Each entry is (tree_name, status, detail) where detail may be None.
+    Status values: 'ok', 'dirty', 'failed'.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with LOG_FILE.open("a") as f:
+        f.write(f"[{timestamp}]\n")
+        for name, status, detail in entries:
+            f.write(f"  {name}: {status}\n")
+            if detail:
+                for line in detail.splitlines():
+                    f.write(f"    {line}\n")
+        f.write("\n")
+
+
 def spawn_shell(path: Path) -> None:
     shell = os.environ.get("SHELL", "/bin/sh")
     print(f"  spawning {shell} in {path} — exit to retry pull")
@@ -168,6 +187,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
         return 0
 
     exit_code = 0
+    log_entries: list[tuple[str, str, str | None]] = []
     for path in subdirs:
         if path.name in exclude:
             continue
@@ -175,20 +195,27 @@ def cmd_update(_args: argparse.Namespace) -> int:
             continue
         if is_dirty(path):
             print(f"{path.name}: skipped (dirty)")
+            log_entries.append((path.name, "dirty", None))
             continue
         remote = get_remote(config, path.name)
         success, output = git_pull(path, remote)
         if success:
             print(f"{path.name}: {output or 'ok'}")
+            log_entries.append((path.name, "ok", output or None))
         else:
             print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
             spawn_shell(path)
             success, output = git_pull(path, remote)
             if success:
                 print(f"{path.name}: {output or 'ok'}")
+                log_entries.append((path.name, "ok", output or None))
             else:
                 print(f"{path.name}: pull failed\n  {output}", file=sys.stderr)
+                log_entries.append((path.name, "failed", output or None))
                 exit_code = 1
+
+    if log_entries:
+        write_log(log_entries)
 
     return exit_code
 
