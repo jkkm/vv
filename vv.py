@@ -339,6 +339,17 @@ def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None) -> t
     return result.returncode == 0, output
 
 
+def run_submodule_update(path: Path) -> tuple[bool, str]:
+    result = subprocess.run(
+        ["git", "submodule", "update", "--init", "--recursive"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
+
+
 def write_log(log_file: Path, entries: list[tuple[str, str, str | None]]) -> None:
     """Write the most recent update run to the log file.
 
@@ -384,8 +395,20 @@ def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
 
     ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
 
+    if ok and repo.driver.name == "git":
+        use_submodules = repo.tree_cfg.get("submodules", (repo.path / ".gitmodules").exists())
+        if use_submodules:
+            sub_ok, sub_out = run_submodule_update(repo.path)
+            if not sub_ok:
+                ok = False
+            sub_parts = [sub_out] if sub_out else []
+        else:
+            sub_parts = []
+    else:
+        sub_parts = []
+
     status = "ok" if ok else "failed"
-    display_parts = errors + ([update_out] if update_out else [])
+    display_parts = errors + ([update_out] if update_out else []) + sub_parts
     display = "\n".join(display_parts) or None
     log_parts = fetch_outputs + display_parts
     log_detail = "\n".join(log_parts) or None

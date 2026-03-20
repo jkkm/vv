@@ -64,6 +64,7 @@ or inline as the value under `include.<path>` for standalone repos.
 | `type` | VCS type (`git`, `hg`, `svn`, `cvs`); autodetected from directory markers (`.git`, `.hg`, `.svn`, `CVS`) when absent |
 | `remotes` | List of remotes to fetch; defaults to all from `git remote` (git only) |
 | `updatecmd` | Shell command to run instead of the default update command for the VCS |
+| `submodules` | `true`/`false` to override submodule update behavior; by default `git submodule update --init --recursive` is run after a successful merge when `.gitmodules` exists (git only) |
 
 ### Include
 
