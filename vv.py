@@ -155,10 +155,11 @@ def get_vcs_driver(tree_cfg: dict, path: Path) -> VcsDriver | None:
     return detect_vcs(path)
 
 
-def is_dirty(path: Path, driver: VcsDriver) -> bool:
-    result = subprocess.run(
-        list(driver.dirty_cmd), cwd=path, capture_output=True, text=True
-    )
+def is_dirty(path: Path, driver: VcsDriver, ignore_submodules: bool = False) -> bool:
+    cmd = list(driver.dirty_cmd)
+    if ignore_submodules and driver.name == "git":
+        cmd.append("--ignore-submodules=all")
+    result = subprocess.run(cmd, cwd=path, capture_output=True, text=True)
     return bool(result.stdout.strip())
 
 
@@ -320,7 +321,11 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
         return 1
 
     for repo in get_repos(config):
-        if is_dirty(repo.path, repo.driver):
+        use_submodules = (
+            repo.driver.name == "git"
+            and repo.tree_cfg.get("submodules", (repo.path / ".gitmodules").exists())
+        )
+        if is_dirty(repo.path, repo.driver, ignore_submodules=use_submodules):
             print(repo.label)
 
     return 0
@@ -379,7 +384,12 @@ def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
     Returns (status, display_output, log_detail) where display_output is
     shown to the user and log_detail is the full output written to the log.
     """
-    if is_dirty(repo.path, repo.driver):
+    use_submodules = (
+        repo.driver.name == "git"
+        and repo.tree_cfg.get("submodules", (repo.path / ".gitmodules").exists())
+    )
+
+    if is_dirty(repo.path, repo.driver, ignore_submodules=use_submodules):
         return "dirty", None, None
 
     fetch_outputs = []
@@ -395,15 +405,11 @@ def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
 
     ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
 
-    if ok and repo.driver.name == "git":
-        use_submodules = repo.tree_cfg.get("submodules", (repo.path / ".gitmodules").exists())
-        if use_submodules:
-            sub_ok, sub_out = run_submodule_update(repo.path)
-            if not sub_ok:
-                ok = False
-            sub_parts = [sub_out] if sub_out else []
-        else:
-            sub_parts = []
+    if ok and use_submodules:
+        sub_ok, sub_out = run_submodule_update(repo.path)
+        if not sub_ok:
+            ok = False
+        sub_parts = [sub_out] if sub_out else []
     else:
         sub_parts = []
 
