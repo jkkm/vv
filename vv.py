@@ -34,6 +34,7 @@ CONFIG_FILE = Path.home() / ".vv.conf"
 DEFAULT_LOG_FILE = Path.home() / ".vv.log"
 DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
+DEFAULT_FETCH_TIMEOUT = 60  # seconds
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,10 @@ def get_jobs(config: dict) -> int:
     return int(config.get("jobs") or DEFAULT_JOBS)
 
 
+def get_fetch_timeout(config: dict) -> int:
+    return int(config.get("fetch_timeout") or DEFAULT_FETCH_TIMEOUT)
+
+
 def get_log_file(config: dict) -> Path:
     raw = config.get("logfile")
     return Path(raw).expanduser() if raw else DEFAULT_LOG_FILE
@@ -119,17 +124,23 @@ def get_all_remotes(path: Path) -> list[str]:
         cwd=path,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
     )
     return result.stdout.splitlines()
 
 
-def git_fetch(path: Path, remote: str) -> tuple[bool, str]:
-    result = subprocess.run(
-        ["git", "fetch", "--verbose", remote],
-        cwd=path,
-        capture_output=True,
-        text=True,
-    )
+def git_fetch(path: Path, remote: str, timeout: int) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "--verbose", remote],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"fetch timed out after {timeout}s"
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
 
@@ -159,7 +170,7 @@ def is_dirty(path: Path, driver: VcsDriver, ignore_submodules: bool = False) -> 
     cmd = list(driver.dirty_cmd)
     if ignore_submodules and driver.name == "git":
         cmd.append("--ignore-submodules=all")
-    result = subprocess.run(cmd, cwd=path, capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=path, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return bool(result.stdout.strip())
 
 
@@ -331,26 +342,36 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     return 0
 
 
-def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None) -> tuple[bool, str]:
-    if updatecmd:
-        result = subprocess.run(
-            updatecmd, shell=True, cwd=path, capture_output=True, text=True
-        )
-    else:
-        result = subprocess.run(
-            list(driver.update_cmd), cwd=path, capture_output=True, text=True
-        )
+def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None, timeout: int = DEFAULT_FETCH_TIMEOUT) -> tuple[bool, str]:
+    try:
+        if updatecmd:
+            result = subprocess.run(
+                updatecmd, shell=True, cwd=path, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL, timeout=timeout,
+            )
+        else:
+            result = subprocess.run(
+                list(driver.update_cmd), cwd=path, capture_output=True, text=True,
+                stdin=subprocess.DEVNULL, timeout=timeout,
+            )
+    except subprocess.TimeoutExpired:
+        return False, f"update timed out after {timeout}s"
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
 
 
-def run_submodule_update(path: Path) -> tuple[bool, str]:
-    result = subprocess.run(
-        ["git", "submodule", "update", "--init", "--recursive"],
-        cwd=path,
-        capture_output=True,
-        text=True,
-    )
+def run_submodule_update(path: Path, timeout: int = DEFAULT_FETCH_TIMEOUT) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"submodule update timed out after {timeout}s"
     output = (result.stdout + result.stderr).strip()
     return result.returncode == 0, output
 
@@ -378,7 +399,7 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
-def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
+def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | None]:
     """Thread worker: fetch all remotes then fast-forward merge.
 
     Returns (status, display_output, log_detail) where display_output is
@@ -397,16 +418,16 @@ def _update_worker(repo: Repo) -> tuple[str, str | None, str | None]:
     if repo.driver.name == "git":
         fetch_remotes = repo.tree_cfg.get("remotes") or get_all_remotes(repo.path)
         for remote in fetch_remotes:
-            ok, out = git_fetch(repo.path, remote)
+            ok, out = git_fetch(repo.path, remote, timeout)
             if not ok and out:
                 errors.append(f"fetch {remote}: {out}")
             elif out:
                 fetch_outputs.append(f"fetch {remote}: {out}")
 
-    ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"))
+    ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"), timeout)
 
     if ok and use_submodules:
-        sub_ok, sub_out = run_submodule_update(repo.path)
+        sub_ok, sub_out = run_submodule_update(repo.path, timeout)
         if not sub_ok:
             ok = False
         sub_parts = [sub_out] if sub_out else []
@@ -427,6 +448,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
     if require_basedirs(config) is None:
         return 1
     jobs = get_jobs(config)
+    timeout = get_fetch_timeout(config)
 
     repos = get_repos(config)
     if not repos:
@@ -436,7 +458,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
     result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
     def worker(repo: Repo) -> None:
-        status, display, log_detail = _update_worker(repo)
+        status, display, log_detail = _update_worker(repo, timeout)
         result_queue.put((repo, status, display, log_detail))
 
     log_entries: list[tuple[str, str, str | None]] = []
@@ -464,7 +486,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
             log_entries.append((repo.label, "failed", "VCS marker gone"))
             exit_code = 1
             continue
-        success, output = run_update(repo.path, driver, repo.tree_cfg.get("updatecmd"))
+        success, output = run_update(repo.path, driver, repo.tree_cfg.get("updatecmd"), timeout)
         if success:
             print(f"{repo.label}: {output or 'ok'}")
             log_entries.append((repo.label, "ok", output or None))
@@ -480,6 +502,8 @@ def cmd_update(_args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    os.environ["GIT_TERMINAL_PROMPT"] = "0"
+
     parser = argparse.ArgumentParser(
         prog="vv",
         description="Keep source trees up to date with upstream",

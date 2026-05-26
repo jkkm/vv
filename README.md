@@ -42,6 +42,7 @@ include:
 | `basedirs` | `~/src` | Dict of directory paths to scan for repos (see below) |
 | `jobs` | `4` | Number of parallel pulls |
 | `logfile` | `~/.vv.log` | Path to the update log file |
+| `fetch_timeout` | `60` | Seconds before a fetch or update is killed and reported as failed |
 | `include` | *(none)* | Dict of repo paths to manage outside any basedir (see below) |
 
 ### Per-basedir keys
