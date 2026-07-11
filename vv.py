@@ -551,6 +551,15 @@ def spawn_shell(path: Path) -> None:
     subprocess.run([shell], cwd=path)
 
 
+def interactive_recovery_enabled(args: argparse.Namespace) -> bool:
+    """Return whether failed updates may open interactive recovery shells."""
+    return (
+        not getattr(args, "no_interactive", False)
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
+
+
 def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | None]:
     """Thread worker: fetch all remotes then fast-forward merge.
 
@@ -598,7 +607,7 @@ def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | Non
     return status, display, log_detail
 
 
-def cmd_update(_args: argparse.Namespace) -> int:
+def cmd_update(args: argparse.Namespace) -> int:
     config = load_config()
     validate_config(config)
     jobs = get_jobs(config)
@@ -612,7 +621,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
         return 1 if discovery.errors else 0
 
     log_entries: list[tuple[str, str, str | None]] = []
-    failures: list[Repo] = []
+    failures: list[tuple[Repo, str | None]] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {executor.submit(_update_worker, repo, timeout): repo for repo in repos}
         for future in as_completed(futures):
@@ -631,10 +640,21 @@ def cmd_update(_args: argparse.Namespace) -> int:
                 log_entries.append((repo.label, "ok", log_detail))
             else:
                 print(f"{repo.label}: update failed\n  {display}", file=sys.stderr)
-                failures.append(repo)
+                failures.append((repo, log_detail))
 
     exit_code = 1 if discovery.errors else 0
-    for repo in failures:
+    if failures and not interactive_recovery_enabled(args):
+        if getattr(args, "no_interactive", False):
+            reason = "--no-interactive was specified"
+        else:
+            reason = "input and output are not attached to a terminal"
+        print(f"interactive recovery skipped: {reason}", file=sys.stderr)
+        for repo, log_detail in failures:
+            log_entries.append((repo.label, "failed", log_detail))
+        exit_code = 1
+        failures = []
+
+    for repo, _initial_log_detail in failures:
         spawn_shell(repo.path)
         try:
             status, display, log_detail = _update_worker(repo, timeout)
@@ -669,7 +689,12 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("list", help="List managed repositories")
-    sub.add_parser("update", help="Update all clean repositories (default)")
+    p_update = sub.add_parser("update", help="Update all clean repositories (default)")
+    p_update.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="Do not open recovery shells for failed updates",
+    )
     sub.add_parser("dirty", help="List repositories with uncommitted changes")
 
     p_include = sub.add_parser("include", help="Explicitly include a repository")

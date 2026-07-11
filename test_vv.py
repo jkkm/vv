@@ -438,7 +438,126 @@ class UpdateWorkerTests(unittest.TestCase):
         run_update.assert_not_called()
 
 
+class RecoveryEligibilityTests(unittest.TestCase):
+    class TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    def test_update_help_documents_noninteractive_option(self):
+        result = subprocess.run(
+            [sys.executable, str(Path(vv.__file__)), "update", "--help"],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--no-interactive", result.stdout)
+
+    def test_explicit_noninteractive_mode_overrides_ttys(self):
+        with (
+            patch("vv.sys.stdin", self.TTY()),
+            patch("vv.sys.stdout", self.TTY()),
+        ):
+            enabled = vv.interactive_recovery_enabled(
+                argparse.Namespace(no_interactive=True)
+            )
+
+        self.assertFalse(enabled)
+
+    def test_recovery_requires_both_input_and_output_ttys(self):
+        cases = [
+            (self.TTY(), self.TTY(), True),
+            (io.StringIO(), self.TTY(), False),
+            (self.TTY(), io.StringIO(), False),
+        ]
+
+        for stdin, stdout, expected in cases:
+            with self.subTest(stdin=stdin.isatty(), stdout=stdout.isatty()):
+                with patch("vv.sys.stdin", stdin), patch("vv.sys.stdout", stdout):
+                    enabled = vv.interactive_recovery_enabled(
+                        argparse.Namespace(no_interactive=False)
+                    )
+                self.assertEqual(enabled, expected)
+
+
 class UpdateCommandTests(unittest.TestCase):
+    @staticmethod
+    def config(tempdir: str) -> dict:
+        return {
+            "basedirs": {tempdir: {}},
+            "logfile": str(Path(tempdir) / "vv.log"),
+        }
+
+    def test_explicit_noninteractive_failure_is_logged_without_shell(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = self.config(tempdir)
+            with (
+                patch("vv.load_config", return_value=config),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
+                patch(
+                    "vv._update_worker",
+                    return_value=("failed", "fetch failed", "details"),
+                ),
+                patch("vv.spawn_shell") as spawn_shell,
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()) as stderr,
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=True))
+
+            log = Path(config["logfile"]).read_text()
+
+        self.assertEqual(exit_code, 1)
+        spawn_shell.assert_not_called()
+        self.assertIn(
+            "interactive recovery skipped: --no-interactive was specified",
+            stderr.getvalue(),
+        )
+        self.assertIn("repo: failed", log)
+        self.assertIn("details", log)
+
+    def test_non_tty_failure_skips_recovery_automatically(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            with (
+                patch("vv.load_config", return_value=self.config(tempdir)),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
+                patch("vv._update_worker", return_value=("failed", "failed", None)),
+                patch("vv.interactive_recovery_enabled", return_value=False),
+                patch("vv.spawn_shell") as spawn_shell,
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()) as stderr,
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=False))
+
+        self.assertEqual(exit_code, 1)
+        spawn_shell.assert_not_called()
+        self.assertIn("not attached to a terminal", stderr.getvalue())
+
+    def test_multiple_noninteractive_failures_are_all_logged(self):
+        repos = [
+            vv.Repo(Path("/one"), vv._VCS_BY_NAME["git"], "one", {}),
+            vv.Repo(Path("/two"), vv._VCS_BY_NAME["git"], "two", {}),
+        ]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            with (
+                patch("vv.load_config", return_value=self.config(tempdir)),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult(repos, [])),
+                patch("vv._update_worker", return_value=("failed", "failed", "detail")),
+                patch("vv.write_log") as write_log,
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=True))
+
+        entries = write_log.call_args.args[1]
+        self.assertEqual(exit_code, 1)
+        failed_names = {name for name, status, _detail in entries if status == "failed"}
+        self.assertEqual(failed_names, {"one", "two"})
+
     def test_update_processes_repositories_but_fails_for_discovery_errors(self):
         repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
         discovery = vv.DiscoveryResult([repo], ["basedir does not exist: /missing"])
@@ -467,6 +586,7 @@ class UpdateCommandTests(unittest.TestCase):
                 patch("vv.load_config", return_value=config),
                 patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
                 patch("vv._update_worker", side_effect=results) as worker,
+                patch("vv.interactive_recovery_enabled", return_value=True),
                 patch("vv.spawn_shell") as spawn_shell,
                 redirect_stdout(io.StringIO()),
                 redirect_stderr(io.StringIO()) as stderr,
@@ -477,6 +597,33 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertIn("unexpected error: missing git", stderr.getvalue())
         self.assertEqual(worker.call_args_list, [call(repo, 60), call(repo, 60)])
         spawn_shell.assert_called_once_with(repo.path)
+
+    def test_interactive_retry_failure_is_logged_and_returns_failure(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+        results = [
+            ("failed", "initial failure", "initial detail"),
+            ("failed", "retry failure", "retry detail"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = self.config(tempdir)
+            with (
+                patch("vv.load_config", return_value=config),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
+                patch("vv._update_worker", side_effect=results),
+                patch("vv.interactive_recovery_enabled", return_value=True),
+                patch("vv.spawn_shell") as spawn_shell,
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(io.StringIO()),
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=False))
+
+            log = Path(config["logfile"]).read_text()
+
+        self.assertEqual(exit_code, 1)
+        spawn_shell.assert_called_once_with(repo.path)
+        self.assertIn("repo: failed", log)
+        self.assertIn("retry detail", log)
 
 
 if __name__ == "__main__":

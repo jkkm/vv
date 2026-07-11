@@ -102,7 +102,9 @@ Dirty trees are skipped with a warning. Results are printed by the main thread
 as each update completes, avoiding interleaved output. If any updates fail, an
 interactive shell is spawned in each affected tree (after all parallel updates
 finish) so the problem can be investigated; the update is retried when the
-shell exits.
+shell exits. Recovery shells are opened only when both input and output are
+attached to a terminal. Use `vv update --no-interactive` to disable shell
+recovery explicitly; failed updates are logged and the command returns nonzero.
 
 Results are appended to `~/.vv.log`.
 
