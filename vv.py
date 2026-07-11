@@ -277,8 +277,8 @@ def git_fetch(path: Path, remote: str, timeout: int) -> tuple[bool, str]:
 def get_basedirs(config: dict) -> dict[Path, dict]:
     raw = config.get("basedirs") or {}
     if not raw:
-        return {DEFAULT_BASEDIR: {}}
-    return {Path(k).expanduser(): (v or {}) for k, v in raw.items()}
+        return {DEFAULT_BASEDIR.resolve(): {}}
+    return {Path(k).expanduser().resolve(): (v or {}) for k, v in raw.items()}
 
 
 def detect_vcs(path: Path) -> VcsDriver | None:
@@ -314,22 +314,15 @@ class Repo:
     tree_cfg: dict
 
 
+@dataclass
+class DiscoveryResult:
+    repos: list[Repo]
+    errors: list[str]
+
+
 def get_include(config: dict) -> dict[Path, dict]:
     raw = config.get("include") or {}
-    return {Path(k).expanduser(): (v or {}) for k, v in raw.items()}
-
-
-def require_basedirs(config: dict) -> dict[Path, dict] | None:
-    """Return basedirs dict if all exist, or print an error and return None."""
-    basedirs = get_basedirs(config)
-    if not basedirs:
-        print("error: no basedirs configured in ~/.vv.conf", file=sys.stderr)
-        return None
-    for path in basedirs:
-        if not path.is_dir():
-            print(f"error: basedir does not exist: {path}", file=sys.stderr)
-            return None
-    return basedirs
+    return {Path(k).expanduser().resolve(): (v or {}) for k, v in raw.items()}
 
 
 def get_tree_cfg(basedir_section: dict | None, path: Path) -> dict:
@@ -344,30 +337,52 @@ def get_tree_cfg(basedir_section: dict | None, path: Path) -> dict:
     return trees.get(path.name) or {}
 
 
-def get_repos(config: dict) -> list[Repo]:
-    """Return all managed repos from all basedirs plus includes."""
+def get_repos(config: dict) -> DiscoveryResult:
+    """Discover managed repositories and errors in explicitly configured sources."""
     repos: list[Repo] = []
+    errors: list[str] = []
     basedir_paths: set[Path] = set()
+    has_configured_basedirs = bool(config.get("basedirs"))
 
     for basedir, section in sorted(get_basedirs(config).items()):
         exclude = set(section.get("exclude") or [])
         if not basedir.is_dir():
+            if has_configured_basedirs:
+                errors.append(f"basedir does not exist: {basedir}")
             continue
-        for p in sorted(basedir.iterdir()):
+        try:
+            children = sorted(basedir.iterdir())
+        except OSError as exc:
+            errors.append(f"cannot scan basedir {basedir}: {exc}")
+            continue
+        for p in children:
             if p.is_dir() and p.name not in exclude:
                 tree_cfg = get_tree_cfg(section, p)
                 driver = get_vcs_driver(tree_cfg, p)
                 if driver is not None:
-                    repos.append(Repo(p, driver, p.name, tree_cfg))
-                    basedir_paths.add(p)
+                    canonical_path = p.resolve()
+                    if canonical_path not in basedir_paths:
+                        repos.append(Repo(canonical_path, driver, p.name, tree_cfg))
+                        basedir_paths.add(canonical_path)
 
     for p, tree_cfg in sorted(get_include(config).items(), key=lambda x: x[0].name):
-        if p not in basedir_paths and p.is_dir():
-            driver = get_vcs_driver(tree_cfg, p)
-            if driver is not None:
-                repos.append(Repo(p, driver, str(p), tree_cfg))
+        if p in basedir_paths:
+            continue
+        if not p.is_dir():
+            errors.append(f"included repository does not exist: {p}")
+            continue
+        driver = get_vcs_driver(tree_cfg, p)
+        if driver is None:
+            errors.append(f"no supported VCS found at included repository: {p}")
+            continue
+        repos.append(Repo(p, driver, str(p), tree_cfg))
 
-    return repos
+    return DiscoveryResult(repos, errors)
+
+
+def report_discovery_errors(errors: list[str]) -> None:
+    for error in errors:
+        print(f"error: {error}", file=sys.stderr)
 
 
 def cmd_include(args: argparse.Namespace) -> int:
@@ -422,7 +437,7 @@ def cmd_exclude(args: argparse.Namespace) -> int:
     raw_basedirs = config.get("basedirs") or {}
     raw_key = None
     for k in raw_basedirs:
-        if Path(k).expanduser() == owner:
+        if Path(k).expanduser().resolve() == owner:
             raw_key = k
             break
 
@@ -448,23 +463,23 @@ def cmd_exclude(args: argparse.Namespace) -> int:
 def cmd_list(_args: argparse.Namespace) -> int:
     config = load_config()
     validate_config(config)
-    if require_basedirs(config) is None:
-        return 1
+    discovery = get_repos(config)
+    report_discovery_errors(discovery.errors)
 
-    for repo in get_repos(config):
+    for repo in discovery.repos:
         print(f"{repo.label} ({repo.driver.name})")
 
-    return 0
+    return 1 if discovery.errors else 0
 
 
 def cmd_dirty(_args: argparse.Namespace) -> int:
     config = load_config()
     validate_config(config)
-    if require_basedirs(config) is None:
-        return 1
+    discovery = get_repos(config)
+    report_discovery_errors(discovery.errors)
 
     exit_code = 0
-    for repo in get_repos(config):
+    for repo in discovery.repos:
         use_submodules = (
             repo.driver.name == "git"
             and repo.tree_cfg.get("submodules", (repo.path / ".gitmodules").exists())
@@ -476,7 +491,7 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
             print(f"{repo.label}: {exc}", file=sys.stderr)
             exit_code = 1
 
-    return exit_code
+    return 1 if discovery.errors else exit_code
 
 
 def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None, timeout: int = DEFAULT_FETCH_TIMEOUT) -> tuple[bool, str]:
@@ -586,15 +601,15 @@ def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | Non
 def cmd_update(_args: argparse.Namespace) -> int:
     config = load_config()
     validate_config(config)
-    if require_basedirs(config) is None:
-        return 1
     jobs = get_jobs(config)
     timeout = get_fetch_timeout(config)
 
-    repos = get_repos(config)
+    discovery = get_repos(config)
+    report_discovery_errors(discovery.errors)
+    repos = discovery.repos
     if not repos:
         print("no repositories found")
-        return 0
+        return 1 if discovery.errors else 0
 
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[Repo] = []
@@ -618,7 +633,7 @@ def cmd_update(_args: argparse.Namespace) -> int:
                 print(f"{repo.label}: update failed\n  {display}", file=sys.stderr)
                 failures.append(repo)
 
-    exit_code = 0
+    exit_code = 1 if discovery.errors else 0
     for repo in failures:
         spawn_shell(repo.path)
         try:

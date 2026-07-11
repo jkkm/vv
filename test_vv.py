@@ -253,6 +253,132 @@ class ConfigSavingTests(unittest.TestCase):
             self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
 
 
+class DiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def make_git_repo(path: Path) -> None:
+        path.mkdir()
+        (path / ".git").mkdir()
+
+    def test_include_works_without_default_basedir(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            repo_path = root / "standalone"
+            self.make_git_repo(repo_path)
+
+            with patch("vv.DEFAULT_BASEDIR", root / "missing-src"):
+                result = vv.get_repos({"include": {str(repo_path): None}})
+
+        self.assertEqual([repo.path for repo in result.repos], [repo_path])
+        self.assertEqual(result.errors, [])
+
+    def test_include_only_configuration_works_in_fresh_cli_process(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            home = Path(tempdir)
+            repo_path = home / "standalone"
+            self.make_git_repo(repo_path)
+            (home / ".vv.conf").write_text(
+                yaml.safe_dump({"include": {str(repo_path): None}})
+            )
+
+            result = subprocess.run(
+                [sys.executable, str(Path(vv.__file__)), "list"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": tempdir},
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, f"{repo_path} (git)\n")
+        self.assertEqual(result.stderr, "")
+
+    def test_missing_implicit_default_basedir_is_optional(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            with patch("vv.DEFAULT_BASEDIR", Path(tempdir) / "missing-src"):
+                result = vv.get_repos({})
+
+        self.assertEqual(result.repos, [])
+        self.assertEqual(result.errors, [])
+
+    def test_missing_explicit_basedir_does_not_hide_valid_include(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            repo_path = root / "standalone"
+            missing = root / "missing-src"
+            self.make_git_repo(repo_path)
+
+            result = vv.get_repos(
+                {
+                    "basedirs": {str(missing): {}},
+                    "include": {str(repo_path): None},
+                }
+            )
+
+        self.assertEqual([repo.path for repo in result.repos], [repo_path])
+        self.assertEqual(result.errors, [f"basedir does not exist: {missing}"])
+
+    def test_missing_and_unrecognized_includes_are_reported(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            basedir = root / "src"
+            missing = root / "missing"
+            unrecognized = root / "plain-directory"
+            basedir.mkdir()
+            unrecognized.mkdir()
+
+            result = vv.get_repos(
+                {
+                    "basedirs": {str(basedir): {}},
+                    "include": {str(missing): None, str(unrecognized): None},
+                }
+            )
+
+        self.assertEqual(result.repos, [])
+        self.assertEqual(
+            set(result.errors),
+            {
+                f"included repository does not exist: {missing}",
+                f"no supported VCS found at included repository: {unrecognized}",
+            },
+        )
+
+    def test_canonical_paths_deduplicate_basedir_and_symlinked_include(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            basedir = root / "src"
+            basedir.mkdir()
+            repo_path = basedir / "repo"
+            self.make_git_repo(repo_path)
+            alias = root / "repo-alias"
+            alias.symlink_to(repo_path, target_is_directory=True)
+
+            result = vv.get_repos(
+                {
+                    "basedirs": {str(basedir): {}},
+                    "include": {str(alias): None},
+                }
+            )
+
+        self.assertEqual(len(result.repos), 1)
+        self.assertEqual(result.repos[0].path, repo_path)
+        self.assertEqual(result.errors, [])
+
+    def test_list_reports_errors_after_listing_valid_repositories(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+        discovery = vv.DiscoveryResult([repo], ["basedir does not exist: /missing"])
+
+        with (
+            patch("vv.load_config", return_value={}),
+            patch("vv.get_repos", return_value=discovery),
+            redirect_stdout(io.StringIO()) as stdout,
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            exit_code = vv.cmd_list(argparse.Namespace())
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "repo (git)\n")
+        self.assertEqual(stderr.getvalue(), "error: basedir does not exist: /missing\n")
+
+
 class DirtyCheckTests(unittest.TestCase):
     def test_nonzero_exit_is_an_error_not_a_clean_tree(self):
         result = subprocess.CompletedProcess([], 128, stdout="", stderr="fatal: broken repository")
@@ -267,7 +393,7 @@ class DirtyCheckTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tempdir,
             patch("vv.load_config", return_value={"basedirs": {tempdir: {}}}),
-            patch("vv.get_repos", return_value=[repo]),
+            patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
             patch("vv.is_dirty", side_effect=vv.DirtyCheckError("status failed")),
             redirect_stderr(io.StringIO()) as stderr,
         ):
@@ -275,6 +401,22 @@ class DirtyCheckTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertIn("repo: status failed", stderr.getvalue())
+
+    def test_dirty_processes_repositories_but_fails_for_discovery_errors(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+        discovery = vv.DiscoveryResult([repo], ["included repository does not exist: /missing"])
+
+        with (
+            patch("vv.load_config", return_value={}),
+            patch("vv.get_repos", return_value=discovery),
+            patch("vv.is_dirty", return_value=False) as is_dirty,
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            exit_code = vv.cmd_dirty(argparse.Namespace())
+
+        self.assertEqual(exit_code, 1)
+        is_dirty.assert_called_once()
+        self.assertIn("included repository does not exist: /missing", stderr.getvalue())
 
 
 class UpdateWorkerTests(unittest.TestCase):
@@ -297,6 +439,24 @@ class UpdateWorkerTests(unittest.TestCase):
 
 
 class UpdateCommandTests(unittest.TestCase):
+    def test_update_processes_repositories_but_fails_for_discovery_errors(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+        discovery = vv.DiscoveryResult([repo], ["basedir does not exist: /missing"])
+
+        with (
+            patch("vv.load_config", return_value={}),
+            patch("vv.get_repos", return_value=discovery),
+            patch("vv._update_worker", return_value=("ok", None, None)) as worker,
+            patch("vv.write_log"),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            exit_code = vv.cmd_update(argparse.Namespace())
+
+        self.assertEqual(exit_code, 1)
+        worker.assert_called_once_with(repo, 60)
+        self.assertIn("basedir does not exist: /missing", stderr.getvalue())
+
     def test_worker_exception_is_recovered_and_full_workflow_is_retried(self):
         repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
         results = [RuntimeError("missing git"), ("ok", None, "retry succeeded")]
@@ -305,7 +465,7 @@ class UpdateCommandTests(unittest.TestCase):
             config = {"basedirs": {tempdir: {}}, "logfile": str(Path(tempdir) / "vv.log")}
             with (
                 patch("vv.load_config", return_value=config),
-                patch("vv.get_repos", return_value=[repo]),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
                 patch("vv._update_worker", side_effect=results) as worker,
                 patch("vv.spawn_shell") as spawn_shell,
                 redirect_stdout(io.StringIO()),

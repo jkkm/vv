@@ -81,6 +81,14 @@ or inline as the value under `include.<path>` for standalone repos.
 key is an absolute path; the value is a tree config dict (same keys as
 per-tree overrides), or `null`/empty for defaults.
 
+Includes are processed independently of basedirs, so an include-only
+configuration does not require the default `~/src` directory. Missing explicitly
+configured basedirs or includes, and included directories without a supported
+VCS, are reported as errors. Valid repositories are still processed, and the
+command returns a nonzero status after reporting any discovery errors. Paths are
+resolved before discovery so aliases and symlinks do not update a repository
+twice.
+
 ## Commands
 
 ### `vv update`
