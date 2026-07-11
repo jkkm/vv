@@ -35,6 +35,10 @@ DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
 DEFAULT_FETCH_TIMEOUT = 60  # seconds
 
+_TOP_LEVEL_KEYS = {"basedirs", "fetch_timeout", "include", "jobs", "logfile"}
+_BASEDIR_KEYS = {"exclude", "trees"}
+_TREE_KEYS = {"remotes", "submodules", "type", "updatecmd"}
+
 
 @dataclass(frozen=True)
 class VcsDriver:
@@ -57,50 +61,148 @@ class DirtyCheckError(RuntimeError):
     """Raised when a repository's dirty state cannot be determined."""
 
 
+class ConfigError(ValueError):
+    """Raised when ~/.vv.conf cannot be loaded or validated."""
+
+
 def load_config() -> dict:
     if not CONFIG_FILE.exists():
         return {}
-    with CONFIG_FILE.open() as f:
-        return yaml.safe_load(f) or {}
+    try:
+        with CONFIG_FILE.open() as f:
+            config = yaml.safe_load(f)
+    except OSError as exc:
+        raise ConfigError(f"cannot read {CONFIG_FILE}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"invalid YAML in {CONFIG_FILE}: {exc}") from exc
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise ConfigError("configuration root must be a mapping")
+    return config
+
+
+def _config_type_error(key: str, expected: str) -> ConfigError:
+    return ConfigError(f"{key} must be {expected}")
+
+
+def _validate_keys(value: dict, allowed: set[str], key: str) -> None:
+    unknown = sorted(str(item) for item in value if item not in allowed)
+    if unknown:
+        raise ConfigError(f"{key} has unknown key: {unknown[0]}")
+
+
+def _validate_tree_config(value: object, key: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise _config_type_error(key, "a mapping or null")
+    _validate_keys(value, _TREE_KEYS, key)
+
+    vcs_type = value.get("type")
+    if vcs_type is not None:
+        if not isinstance(vcs_type, str):
+            raise _config_type_error(f"{key}.type", "a string")
+        if vcs_type not in _VCS_BY_NAME:
+            supported = ", ".join(sorted(_VCS_BY_NAME))
+            raise ConfigError(f"{key}.type must be one of: {supported}")
+
+    remotes = value.get("remotes")
+    if remotes is not None:
+        if not isinstance(remotes, list) or not all(isinstance(remote, str) for remote in remotes):
+            raise _config_type_error(f"{key}.remotes", "a list of strings")
+
+    updatecmd = value.get("updatecmd")
+    if updatecmd is not None and not isinstance(updatecmd, str):
+        raise _config_type_error(f"{key}.updatecmd", "a string")
+
+    submodules = value.get("submodules")
+    if submodules is not None and not isinstance(submodules, bool):
+        raise _config_type_error(f"{key}.submodules", "a boolean")
 
 
 def validate_config(config: dict) -> None:
-    """Exit with a clear error if the config uses the old single-basedir format."""
+    """Raise ConfigError if config does not match the supported schema."""
+    if not isinstance(config, dict):
+        raise ConfigError("configuration root must be a mapping")
+
     old_keys = []
     if "basedir" in config:
         old_keys.append("basedir")
     if "exclude" in config and isinstance(config["exclude"], list):
         old_keys.append("exclude (top-level list)")
-    if "trees" in config and not any(
-        isinstance(config.get("basedirs", {}).get(k), dict)
-        for k in (config.get("basedirs") or {})
-    ):
-        if "basedirs" not in config:
-            old_keys.append("trees (top-level)")
+    if "trees" in config and "basedirs" not in config:
+        old_keys.append("trees (top-level)")
     if "include" in config and isinstance(config["include"], list):
         old_keys.append("include (list)")
-    if not old_keys:
-        return
-    print(
-        "error: ~/.vv.conf uses the old config format.\n"
-        f"  Detected old-format keys: {', '.join(old_keys)}\n"
-        "\n"
-        "  The new format uses 'basedirs' (plural) with per-basedir settings:\n"
-        "\n"
-        "    basedirs:\n"
-        "      ~/src:\n"
-        "        exclude: [dirname]\n"
-        "        trees:\n"
-        "          reponame:\n"
-        "            remotes: [upstream, origin]\n"
-        "    include:\n"
-        "      ~/other/repo:\n"
-        "        type: git\n"
-        "\n"
-        "  See README.md for the full config reference.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    if old_keys:
+        raise ConfigError(
+            "~/.vv.conf uses the old config format.\n"
+            f"  Detected old-format keys: {', '.join(old_keys)}\n"
+            "\n"
+            "  The new format uses 'basedirs' (plural) with per-basedir settings:\n"
+            "\n"
+            "    basedirs:\n"
+            "      ~/src:\n"
+            "        exclude: [dirname]\n"
+            "        trees:\n"
+            "          reponame:\n"
+            "            remotes: [upstream, origin]\n"
+            "    include:\n"
+            "      ~/other/repo:\n"
+            "        type: git\n"
+            "\n"
+            "  See README.md for the full config reference."
+        )
+
+    _validate_keys(config, _TOP_LEVEL_KEYS, "configuration")
+
+    for key in ("jobs", "fetch_timeout"):
+        value = config.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
+            raise _config_type_error(key, "a positive integer")
+
+    logfile = config.get("logfile")
+    if logfile is not None and not isinstance(logfile, str):
+        raise _config_type_error("logfile", "a string")
+
+    basedirs = config.get("basedirs")
+    if basedirs is not None:
+        if not isinstance(basedirs, dict):
+            raise _config_type_error("basedirs", "a mapping")
+        for basedir, section in basedirs.items():
+            if not isinstance(basedir, str):
+                raise _config_type_error("basedirs keys", "strings")
+            section_key = f"basedirs.{basedir}"
+            if section is None:
+                continue
+            if not isinstance(section, dict):
+                raise _config_type_error(section_key, "a mapping or null")
+            _validate_keys(section, _BASEDIR_KEYS, section_key)
+
+            exclude = section.get("exclude")
+            if exclude is not None and (
+                not isinstance(exclude, list) or not all(isinstance(name, str) for name in exclude)
+            ):
+                raise _config_type_error(f"{section_key}.exclude", "a list of strings")
+
+            trees = section.get("trees")
+            if trees is not None:
+                if not isinstance(trees, dict):
+                    raise _config_type_error(f"{section_key}.trees", "a mapping")
+                for name, tree_config in trees.items():
+                    if not isinstance(name, str):
+                        raise _config_type_error(f"{section_key}.trees keys", "strings")
+                    _validate_tree_config(tree_config, f"{section_key}.trees.{name}")
+
+    includes = config.get("include")
+    if includes is not None:
+        if not isinstance(includes, dict):
+            raise _config_type_error("include", "a mapping")
+        for path, tree_config in includes.items():
+            if not isinstance(path, str):
+                raise _config_type_error("include keys", "strings")
+            _validate_tree_config(tree_config, f"include.{path}")
 
 
 def save_config(config: dict) -> None:
@@ -548,7 +650,11 @@ def main() -> int:
         "include": cmd_include,
         "exclude": cmd_exclude,
     }
-    return dispatch[args.command](args)
+    try:
+        return dispatch[args.command](args)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

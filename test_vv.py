@@ -1,6 +1,8 @@
 import argparse
 import io
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -8,6 +10,176 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 import vv
+
+
+class ConfigValidationTests(unittest.TestCase):
+    def test_accepts_complete_valid_configuration(self):
+        config = {
+            "jobs": 8,
+            "fetch_timeout": 120,
+            "logfile": "~/vv.log",
+            "basedirs": {
+                "~/src": {
+                    "exclude": ["ignored"],
+                    "trees": {
+                        "git-tree": {
+                            "type": "git",
+                            "remotes": ["upstream", "origin"],
+                            "updatecmd": "make update",
+                            "submodules": False,
+                        },
+                        "defaults": None,
+                    },
+                },
+                "~/work": None,
+            },
+            "include": {
+                "~/standalone": {"type": "hg"},
+                "~/defaults": None,
+            },
+        }
+
+        vv.validate_config(config)
+
+    def test_accepts_empty_configuration(self):
+        vv.validate_config({})
+
+    def test_rejects_invalid_values_with_their_config_path(self):
+        cases = [
+            ([], "configuration root must be a mapping"),
+            ({"unknown": True}, "configuration has unknown key: unknown"),
+            ({"jobs": 0}, "jobs must be a positive integer"),
+            ({"jobs": -1}, "jobs must be a positive integer"),
+            ({"jobs": True}, "jobs must be a positive integer"),
+            ({"jobs": "four"}, "jobs must be a positive integer"),
+            ({"fetch_timeout": 0}, "fetch_timeout must be a positive integer"),
+            ({"fetch_timeout": 1.5}, "fetch_timeout must be a positive integer"),
+            ({"logfile": 3}, "logfile must be a string"),
+            ({"basedirs": []}, "basedirs must be a mapping"),
+            ({"basedirs": {1: {}}}, "basedirs keys must be strings"),
+            ({"basedirs": {"~/src": []}}, "basedirs.~/src must be a mapping or null"),
+            (
+                {"basedirs": {"~/src": {"unknown": True}}},
+                "basedirs.~/src has unknown key: unknown",
+            ),
+            (
+                {"basedirs": {"~/src": {"exclude": "repo"}}},
+                "basedirs.~/src.exclude must be a list of strings",
+            ),
+            (
+                {"basedirs": {"~/src": {"exclude": ["repo", 1]}}},
+                "basedirs.~/src.exclude must be a list of strings",
+            ),
+            (
+                {"basedirs": {"~/src": {"trees": []}}},
+                "basedirs.~/src.trees must be a mapping",
+            ),
+            (
+                {"basedirs": {"~/src": {"trees": {1: {}}}}},
+                "basedirs.~/src.trees keys must be strings",
+            ),
+            ({"include": []}, "uses the old config format"),
+            ({"include": {1: None}}, "include keys must be strings"),
+            ({"include": {"~/repo": []}}, "include.~/repo must be a mapping or null"),
+            (
+                {"include": {"~/repo": {"unknown": True}}},
+                "include.~/repo has unknown key: unknown",
+            ),
+            ({"include": {"~/repo": {"type": 1}}}, "include.~/repo.type must be a string"),
+            (
+                {"include": {"~/repo": {"type": "fossil"}}},
+                "include.~/repo.type must be one of: cvs, git, hg, svn",
+            ),
+            (
+                {"include": {"~/repo": {"remotes": "origin"}}},
+                "include.~/repo.remotes must be a list of strings",
+            ),
+            (
+                {"include": {"~/repo": {"remotes": ["origin", 1]}}},
+                "include.~/repo.remotes must be a list of strings",
+            ),
+            (
+                {"include": {"~/repo": {"updatecmd": ["make"]}}},
+                "include.~/repo.updatecmd must be a string",
+            ),
+            (
+                {"include": {"~/repo": {"submodules": "yes"}}},
+                "include.~/repo.submodules must be a boolean",
+            ),
+        ]
+
+        for config, message in cases:
+            with self.subTest(config=config):
+                with self.assertRaisesRegex(vv.ConfigError, message.replace(".", r"\.")):
+                    vv.validate_config(config)
+
+    def test_rejects_old_configuration_with_migration_message(self):
+        cases = [
+            {"basedir": "~/src"},
+            {"exclude": ["repo"]},
+            {"trees": {"repo": {}}},
+            {"include": ["~/repo"]},
+        ]
+
+        for config in cases:
+            with self.subTest(config=config):
+                with self.assertRaisesRegex(vv.ConfigError, "uses the old config format"):
+                    vv.validate_config(config)
+
+
+class ConfigLoadingTests(unittest.TestCase):
+    def test_empty_file_loads_as_empty_configuration(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "vv.conf"
+            path.write_text("")
+            with patch("vv.CONFIG_FILE", path):
+                self.assertEqual(vv.load_config(), {})
+
+    def test_non_mapping_yaml_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "vv.conf"
+            path.write_text("- one\n- two\n")
+            with patch("vv.CONFIG_FILE", path):
+                with self.assertRaisesRegex(vv.ConfigError, "root must be a mapping"):
+                    vv.load_config()
+
+    def test_invalid_yaml_is_reported_as_config_error(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "vv.conf"
+            path.write_text("basedirs: [\n")
+            with patch("vv.CONFIG_FILE", path):
+                with self.assertRaisesRegex(vv.ConfigError, "invalid YAML"):
+                    vv.load_config()
+
+    def test_main_prints_clean_config_error_without_traceback(self):
+        with (
+            tempfile.TemporaryDirectory() as tempdir,
+            patch("vv.CONFIG_FILE", Path(tempdir) / "missing.conf"),
+            patch("vv.load_config", side_effect=vv.ConfigError("jobs must be a positive integer")),
+            patch.object(sys, "argv", ["vv", "list"]),
+            redirect_stderr(io.StringIO()) as stderr,
+        ):
+            exit_code = vv.main()
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(stderr.getvalue(), "error: jobs must be a positive integer\n")
+
+    def test_cli_reports_invalid_yaml_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            home = Path(tempdir)
+            (home / ".vv.conf").write_text("jobs: [\n")
+            env = {**os.environ, "HOME": tempdir}
+
+            result = subprocess.run(
+                [sys.executable, str(Path(vv.__file__)), "list"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("error: invalid YAML", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 class DirtyCheckTests(unittest.TestCase):

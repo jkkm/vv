@@ -14,6 +14,10 @@ But mostly a sandbox for Claude code.
 `vv` reads `~/.vv.conf` on startup. If the file is absent, defaults are used.
 An example config is provided in `vv.conf`.
 
+Configuration is validated before a command runs. Invalid YAML, unknown keys,
+unsupported VCS types, and incorrectly typed values are reported as configuration
+errors with the relevant key path.
+
 ```yaml
 jobs: 4
 
