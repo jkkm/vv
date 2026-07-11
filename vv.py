@@ -18,8 +18,7 @@ import os
 import sys
 import subprocess
 import argparse
-import queue
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -52,6 +51,10 @@ VCS_DRIVERS: list[VcsDriver] = [
     VcsDriver("cvs", "CVS",   ("cvs", "-n", "-q", "update"),                             ("cvs", "update")),
 ]
 _VCS_BY_NAME: dict[str, VcsDriver] = {d.name: d for d in VCS_DRIVERS}
+
+
+class DirtyCheckError(RuntimeError):
+    """Raised when a repository's dirty state cannot be determined."""
 
 
 def load_config() -> dict:
@@ -171,6 +174,9 @@ def is_dirty(path: Path, driver: VcsDriver, ignore_submodules: bool = False) -> 
     if ignore_submodules and driver.name == "git":
         cmd.append("--ignore-submodules=all")
     result = subprocess.run(cmd, cwd=path, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"exit status {result.returncode}"
+        raise DirtyCheckError(f"{driver.name} dirty check failed: {detail}")
     return bool(result.stdout.strip())
 
 
@@ -331,15 +337,20 @@ def cmd_dirty(_args: argparse.Namespace) -> int:
     if require_basedirs(config) is None:
         return 1
 
+    exit_code = 0
     for repo in get_repos(config):
         use_submodules = (
             repo.driver.name == "git"
             and repo.tree_cfg.get("submodules", (repo.path / ".gitmodules").exists())
         )
-        if is_dirty(repo.path, repo.driver, ignore_submodules=use_submodules):
-            print(repo.label)
+        try:
+            if is_dirty(repo.path, repo.driver, ignore_submodules=use_submodules):
+                print(repo.label)
+        except (OSError, DirtyCheckError) as exc:
+            print(f"{repo.label}: {exc}", file=sys.stderr)
+            exit_code = 1
 
-    return 0
+    return exit_code
 
 
 def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None, timeout: int = DEFAULT_FETCH_TIMEOUT) -> tuple[bool, str]:
@@ -424,6 +435,10 @@ def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | Non
             elif out:
                 fetch_outputs.append(f"fetch {remote}: {out}")
 
+    if errors:
+        detail = "\n".join(fetch_outputs + errors)
+        return "failed", "\n".join(errors), detail
+
     ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"), timeout)
 
     if ok and use_submodules:
@@ -455,19 +470,18 @@ def cmd_update(_args: argparse.Namespace) -> int:
         print("no repositories found")
         return 0
 
-    result_queue: queue.SimpleQueue = queue.SimpleQueue()
-
-    def worker(repo: Repo) -> None:
-        status, display, log_detail = _update_worker(repo, timeout)
-        result_queue.put((repo, status, display, log_detail))
-
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[Repo] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
-        for repo in repos:
-            executor.submit(worker, repo)
-        for _ in repos:
-            repo, status, display, log_detail = result_queue.get()
+        futures = {executor.submit(_update_worker, repo, timeout): repo for repo in repos}
+        for future in as_completed(futures):
+            repo = futures[future]
+            try:
+                status, display, log_detail = future.result()
+            except Exception as exc:
+                status = "failed"
+                display = f"unexpected error: {exc}"
+                log_detail = display
             if status == "dirty":
                 print(f"{repo.label}: skipped (dirty)")
                 log_entries.append((repo.label, "dirty", None))
@@ -481,18 +495,22 @@ def cmd_update(_args: argparse.Namespace) -> int:
     exit_code = 0
     for repo in failures:
         spawn_shell(repo.path)
-        driver = detect_vcs(repo.path)
-        if driver is None:
-            log_entries.append((repo.label, "failed", "VCS marker gone"))
+        try:
+            status, display, log_detail = _update_worker(repo, timeout)
+        except Exception as exc:
+            status = "failed"
+            display = f"unexpected error: {exc}"
+            log_detail = display
+        if status == "ok":
+            print(f"{repo.label}: {display or 'ok'}")
+            log_entries.append((repo.label, "ok", log_detail))
+        elif status == "dirty":
+            print(f"{repo.label}: retry skipped (dirty)", file=sys.stderr)
+            log_entries.append((repo.label, "dirty", None))
             exit_code = 1
-            continue
-        success, output = run_update(repo.path, driver, repo.tree_cfg.get("updatecmd"), timeout)
-        if success:
-            print(f"{repo.label}: {output or 'ok'}")
-            log_entries.append((repo.label, "ok", output or None))
         else:
-            print(f"{repo.label}: update failed\n  {output}", file=sys.stderr)
-            log_entries.append((repo.label, "failed", output or None))
+            print(f"{repo.label}: update failed\n  {display}", file=sys.stderr)
+            log_entries.append((repo.label, "failed", log_detail))
             exit_code = 1
 
     if log_entries:
