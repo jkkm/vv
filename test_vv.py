@@ -1,6 +1,7 @@
 import argparse
 import io
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -8,6 +9,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import call, patch
+
+import yaml
 
 import vv
 
@@ -180,6 +183,74 @@ class ConfigLoadingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("error: invalid YAML", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+
+
+class ConfigSavingTests(unittest.TestCase):
+    def test_missing_parent_is_reported_without_creating_a_config(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "missing" / ".vv.conf"
+
+            with patch("vv.CONFIG_FILE", path):
+                with self.assertRaisesRegex(vv.ConfigError, "cannot prepare"):
+                    vv.save_config({"jobs": 4})
+
+            self.assertFalse(path.exists())
+
+    def test_new_config_is_written_safely_with_restrictive_permissions(self):
+        config = {"jobs": 2, "include": {"~/repo": None}}
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / ".vv.conf"
+            with patch("vv.CONFIG_FILE", path):
+                vv.save_config(config)
+
+            self.assertEqual(yaml.safe_load(path.read_text()), config)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_existing_config_permissions_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / ".vv.conf"
+            path.write_text("jobs: 1\n")
+            path.chmod(0o640)
+
+            with patch("vv.CONFIG_FILE", path):
+                vv.save_config({"jobs": 4})
+
+            self.assertEqual(yaml.safe_load(path.read_text()), {"jobs": 4})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_replace_failure_preserves_original_and_removes_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / ".vv.conf"
+            original = "jobs: 1\n"
+            path.write_text(original)
+
+            with (
+                patch("vv.CONFIG_FILE", path),
+                patch("vv.os.replace", side_effect=PermissionError("replace denied")),
+            ):
+                with self.assertRaisesRegex(vv.ConfigError, "replace denied"):
+                    vv.save_config({"jobs": 4})
+
+            self.assertEqual(path.read_text(), original)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
+
+    def test_serialization_failure_preserves_original_and_removes_temporary_file(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / ".vv.conf"
+            original = "jobs: 1\n"
+            path.write_text(original)
+
+            with (
+                patch("vv.CONFIG_FILE", path),
+                patch("vv.yaml.safe_dump", side_effect=yaml.YAMLError("cannot serialize")),
+            ):
+                with self.assertRaisesRegex(vv.ConfigError, "cannot serialize"):
+                    vv.save_config({"jobs": 4})
+
+            self.assertEqual(path.read_text(), original)
+            self.assertEqual(list(path.parent.glob(f".{path.name}.*")), [])
 
 
 class DirtyCheckTests(unittest.TestCase):

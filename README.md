@@ -18,6 +18,10 @@ Configuration is validated before a command runs. Invalid YAML, unknown keys,
 unsupported VCS types, and incorrectly typed values are reported as configuration
 errors with the relevant key path.
 
+The `include` and `exclude` commands update the configuration atomically.
+Existing file permissions are preserved; a newly created configuration is mode
+`0600`.
+
 ```yaml
 jobs: 4
 

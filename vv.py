@@ -18,6 +18,8 @@ import os
 import sys
 import subprocess
 import argparse
+import stat
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
@@ -206,8 +208,30 @@ def validate_config(config: dict) -> None:
 
 
 def save_config(config: dict) -> None:
-    with CONFIG_FILE.open("w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+    """Atomically replace the config, preserving its mode when it exists."""
+    try:
+        mode = stat.S_IMODE(CONFIG_FILE.stat().st_mode) if CONFIG_FILE.exists() else 0o600
+        fd, raw_temp_path = tempfile.mkstemp(
+            dir=CONFIG_FILE.parent,
+            prefix=f".{CONFIG_FILE.name}.",
+        )
+    except OSError as exc:
+        raise ConfigError(f"cannot prepare {CONFIG_FILE} for writing: {exc}") from exc
+
+    temp_path = Path(raw_temp_path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), mode)
+            yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, CONFIG_FILE)
+    except Exception as exc:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ConfigError(f"cannot write {CONFIG_FILE}: {exc}") from exc
 
 
 def get_jobs(config: dict) -> int:
