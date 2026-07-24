@@ -258,19 +258,50 @@ def get_all_remotes(path: Path) -> list[str]:
     return result.stdout.splitlines()
 
 
+def _collapse_progress(text: str) -> str:
+    """Collapse carriage-return progress redraws to what a terminal shows.
+
+    Programs such as git animate progress meters ("Updating files: 71%
+    (...)") by writing carriage returns to redraw the current line in place.
+    When their output is captured instead of shown on a terminal, every
+    redraw is preserved, so a single progress line becomes hundreds of
+    logged lines. Emulate the terminal by keeping, for each newline-delimited
+    line, only the last non-empty text written to it.
+    """
+    collapsed = []
+    for line in text.split("\n"):
+        visible = ""
+        for chunk in line.split("\r"):
+            if chunk:
+                visible = chunk
+        collapsed.append(visible)
+    return "\n".join(collapsed)
+
+
+def _combined_output(result: subprocess.CompletedProcess) -> str:
+    """Decode captured stdout and stderr and collapse progress redraws.
+
+    The output is captured as bytes rather than text: text mode would apply
+    universal-newline translation, turning the carriage returns that redraw
+    progress meters into newlines before _collapse_progress() could fold
+    them away. Decode explicitly so those carriage returns survive.
+    """
+    text = (result.stdout + result.stderr).decode("utf-8", "replace")
+    return _collapse_progress(text).strip()
+
+
 def git_fetch(path: Path, remote: str, timeout: int) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["git", "fetch", "--verbose", remote],
             cwd=path,
             capture_output=True,
-            text=True,
             stdin=subprocess.DEVNULL,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return False, f"fetch timed out after {timeout}s"
-    output = (result.stdout + result.stderr).strip()
+    output = _combined_output(result)
     return result.returncode == 0, output
 
 
@@ -498,17 +529,17 @@ def run_update(path: Path, driver: VcsDriver, updatecmd: str | None = None, time
     try:
         if updatecmd:
             result = subprocess.run(
-                updatecmd, shell=True, cwd=path, capture_output=True, text=True,
+                updatecmd, shell=True, cwd=path, capture_output=True,
                 stdin=subprocess.DEVNULL, timeout=timeout,
             )
         else:
             result = subprocess.run(
-                list(driver.update_cmd), cwd=path, capture_output=True, text=True,
+                list(driver.update_cmd), cwd=path, capture_output=True,
                 stdin=subprocess.DEVNULL, timeout=timeout,
             )
     except subprocess.TimeoutExpired:
         return False, f"update timed out after {timeout}s"
-    output = (result.stdout + result.stderr).strip()
+    output = _combined_output(result)
     return result.returncode == 0, output
 
 
@@ -518,13 +549,12 @@ def run_submodule_update(path: Path, timeout: int = DEFAULT_FETCH_TIMEOUT) -> tu
             ["git", "submodule", "update", "--init", "--recursive"],
             cwd=path,
             capture_output=True,
-            text=True,
             stdin=subprocess.DEVNULL,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return False, f"submodule update timed out after {timeout}s"
-    output = (result.stdout + result.stderr).strip()
+    output = _combined_output(result)
     return result.returncode == 0, output
 
 
