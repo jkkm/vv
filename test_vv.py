@@ -626,5 +626,65 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertIn("retry detail", log)
 
 
+class ProgressCollapseTests(unittest.TestCase):
+    def test_carriage_return_redraws_collapse_to_final_line(self):
+        raw = (
+            "Updating files:  71% (3449/4809)\r"
+            "Updating files:  99% (4761/4809)\r"
+            "Updating files: 100% (4809/4809)\r"
+            "Updating files: 100% (4809/4809), done.\n"
+            "Fast-forward\n"
+        )
+        collapsed = vv._collapse_progress(raw)
+        self.assertEqual(
+            collapsed.splitlines(),
+            ["Updating files: 100% (4809/4809), done.", "Fast-forward"],
+        )
+        self.assertNotIn("\r", collapsed)
+        self.assertNotIn("71%", collapsed)
+
+    def test_plain_output_including_blank_lines_is_unchanged(self):
+        raw = "line one\n\nline two\n"
+        self.assertEqual(vv._collapse_progress(raw), raw)
+
+    def test_trailing_carriage_return_keeps_visible_text(self):
+        # A terminal only moves the cursor on a trailing CR, so text before
+        # it stays visible and must not be dropped.
+        self.assertEqual(vv._collapse_progress("foo\r\nbar"), "foo\nbar")
+
+    def test_git_fetch_output_has_progress_collapsed(self):
+        # Output must be captured as bytes; text mode would translate the
+        # carriage returns to newlines and defeat the collapse.
+        stderr = (
+            b"remote: Counting objects: 100% (5/5), done.\n"
+            b"Receiving objects:  50% (1/2)\r"
+            b"Receiving objects: 100% (2/2), done.\n"
+        )
+        result = subprocess.CompletedProcess([], 0, stdout=b"", stderr=stderr)
+
+        with patch("vv.subprocess.run", return_value=result) as run:
+            ok, output = vv.git_fetch(Path("/repo"), "origin", 60)
+
+        self.assertNotEqual(run.call_args.kwargs.get("text"), True)
+        self.assertTrue(ok)
+        self.assertNotIn("\r", output)
+        self.assertNotIn("50%", output)
+        self.assertIn("Receiving objects: 100% (2/2), done.", output)
+
+    def test_run_update_output_has_progress_collapsed(self):
+        stderr = b"Updating files:  40% (2/5)\rUpdating files: 100% (5/5), done.\n"
+        result = subprocess.CompletedProcess([], 0, stdout=b"Fast-forward\n", stderr=stderr)
+
+        with patch("vv.subprocess.run", return_value=result) as run:
+            ok, output = vv.run_update(Path("/repo"), vv._VCS_BY_NAME["git"])
+
+        self.assertNotEqual(run.call_args.kwargs.get("text"), True)
+        self.assertTrue(ok)
+        self.assertNotIn("\r", output)
+        self.assertNotIn("40%", output)
+        self.assertIn("Fast-forward", output)
+        self.assertIn("Updating files: 100% (5/5), done.", output)
+
+
 if __name__ == "__main__":
     unittest.main()
