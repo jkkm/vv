@@ -419,6 +419,107 @@ class DirtyCheckTests(unittest.TestCase):
         self.assertIn("included repository does not exist: /missing", stderr.getvalue())
 
 
+class BranchStateTests(unittest.TestCase):
+    def test_current_branch_is_returned(self):
+        result = subprocess.CompletedProcess([], 0, stdout="main\n", stderr="")
+
+        with patch("vv.subprocess.run", return_value=result) as run:
+            self.assertEqual(vv.get_current_branch(Path("/repo")), "main")
+
+        self.assertEqual(
+            run.call_args.args[0], ["git", "symbolic-ref", "-q", "--short", "HEAD"]
+        )
+
+    def test_detached_head_returns_none(self):
+        result = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+
+        with patch("vv.subprocess.run", return_value=result):
+            self.assertIsNone(vv.get_current_branch(Path("/repo")))
+
+    def test_branch_lookup_failure_is_an_error_not_a_detached_head(self):
+        result = subprocess.CompletedProcess(
+            [], 128, stdout="", stderr="fatal: not a git repository"
+        )
+
+        with patch("vv.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(vv.BranchCheckError, "not a git repository"):
+                vv.get_current_branch(Path("/repo"))
+
+    def test_upstream_remote_and_track_state_are_parsed(self):
+        result = subprocess.CompletedProcess(
+            [], 0, stdout="origin\t[ahead 1, behind 2]\n", stderr=""
+        )
+
+        with patch("vv.subprocess.run", return_value=result) as run:
+            upstream = vv.get_branch_upstream(Path("/repo"), "topic")
+
+        self.assertEqual(upstream, ("origin", "[ahead 1, behind 2]"))
+        self.assertEqual(run.call_args.args[0][-1], "refs/heads/topic")
+
+    def test_branch_without_upstream_has_empty_fields(self):
+        result = subprocess.CompletedProcess([], 0, stdout="\t\n", stderr="")
+
+        with patch("vv.subprocess.run", return_value=result):
+            self.assertEqual(vv.get_branch_upstream(Path("/repo"), "topic"), ("", ""))
+
+    def test_missing_branch_returns_none(self):
+        result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        with patch("vv.subprocess.run", return_value=result):
+            self.assertIsNone(vv.get_branch_upstream(Path("/repo"), "topic"))
+
+    def test_upstream_lookup_failure_is_an_error(self):
+        result = subprocess.CompletedProcess(
+            [], 128, stdout="", stderr="fatal: not a git repository"
+        )
+
+        with patch("vv.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(vv.BranchCheckError, "not a git repository"):
+                vv.get_branch_upstream(Path("/repo"), "topic")
+
+
+class WorkingBranchReasonTests(unittest.TestCase):
+    @staticmethod
+    def reason(branch, upstream, fetch_remotes=("origin",)):
+        with (
+            patch("vv.get_current_branch", return_value=branch),
+            patch("vv.get_branch_upstream", return_value=upstream),
+        ):
+            return vv.working_branch_reason(Path("/repo"), list(fetch_remotes))
+
+    def test_working_states_are_reported_with_their_cause(self):
+        cases = [
+            (None, None, "detached HEAD"),
+            ("topic", ("", ""), "working branch 'topic': no upstream"),
+            ("topic", (".", ""), "working branch 'topic': tracks a local branch"),
+            (
+                "topic",
+                ("github", ""),
+                "working branch 'topic': upstream remote 'github' is not fetched",
+            ),
+            ("topic", ("origin", "[gone]"), "working branch 'topic': upstream is gone"),
+            ("topic", ("origin", "[ahead 2]"), "working branch 'topic': ahead of upstream"),
+            (
+                "topic",
+                ("origin", "[ahead 1, behind 3]"),
+                "working branch 'topic': diverged from upstream",
+            ),
+        ]
+
+        for branch, upstream, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(self.reason(branch, upstream), expected)
+
+    def test_tracking_branch_that_can_fast_forward_is_not_a_working_state(self):
+        for track in ("", "[behind 3]"):
+            with self.subTest(track=track):
+                self.assertIsNone(self.reason("main", ("origin", track)))
+
+    def test_missing_branch_ref_is_an_error(self):
+        with self.assertRaisesRegex(vv.BranchCheckError, "no ref for branch 'topic'"):
+            self.reason("topic", None)
+
+
 class UpdateWorkerTests(unittest.TestCase):
     def setUp(self):
         self.repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
@@ -435,6 +536,89 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertEqual(status, "failed")
         self.assertIn("fetch origin: network unavailable", display)
         self.assertEqual(display, detail)
+        run_update.assert_not_called()
+
+    def test_working_branch_is_fetched_but_not_merged(self):
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "new refs")) as git_fetch,
+            patch(
+                "vv.working_branch_reason",
+                return_value="working branch 'topic': no upstream",
+            ) as reason,
+            patch("vv.run_update") as run_update,
+        ):
+            status, display, detail = vv._update_worker(self.repo, 10)
+
+        self.assertEqual(status, "branch")
+        self.assertEqual(display, "working branch 'topic': no upstream")
+        self.assertEqual(
+            detail, "fetch origin: new refs\nworking branch 'topic': no upstream"
+        )
+        git_fetch.assert_called_once_with(Path("/repo"), "origin", 10)
+        reason.assert_called_once_with(Path("/repo"), ["origin"])
+        run_update.assert_not_called()
+
+    def test_tracking_branch_in_sync_is_merged(self):
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "")),
+            patch("vv.working_branch_reason", return_value=None),
+            patch("vv.run_update", return_value=(True, "Fast-forward")) as run_update,
+        ):
+            status, display, _detail = vv._update_worker(self.repo, 10)
+
+        self.assertEqual(status, "ok")
+        self.assertEqual(display, "Fast-forward")
+        run_update.assert_called_once()
+
+    def test_custom_updatecmd_bypasses_working_branch_check(self):
+        repo = vv.Repo(
+            Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {"updatecmd": "make update"}
+        )
+
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "")),
+            patch("vv.working_branch_reason") as reason,
+            patch("vv.run_update", return_value=(True, "")) as run_update,
+        ):
+            status, _display, _detail = vv._update_worker(repo, 10)
+
+        self.assertEqual(status, "ok")
+        reason.assert_not_called()
+        run_update.assert_called_once_with(Path("/repo"), repo.driver, "make update", 10)
+
+    def test_non_git_repositories_skip_working_branch_check(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["hg"], "repo", {})
+
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.working_branch_reason") as reason,
+            patch("vv.run_update", return_value=(True, "")),
+        ):
+            status, _display, _detail = vv._update_worker(repo, 10)
+
+        self.assertEqual(status, "ok")
+        reason.assert_not_called()
+
+    def test_branch_check_error_propagates_instead_of_merging(self):
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "")),
+            patch(
+                "vv.working_branch_reason",
+                side_effect=vv.BranchCheckError("git branch check failed: boom"),
+            ),
+            patch("vv.run_update") as run_update,
+        ):
+            with self.assertRaisesRegex(vv.BranchCheckError, "boom"):
+                vv._update_worker(self.repo, 10)
+
         run_update.assert_not_called()
 
 
@@ -597,6 +781,69 @@ class UpdateCommandTests(unittest.TestCase):
         self.assertIn("unexpected error: missing git", stderr.getvalue())
         self.assertEqual(worker.call_args_list, [call(repo, 60), call(repo, 60)])
         spawn_shell.assert_called_once_with(repo.path)
+
+    def test_working_branch_skip_is_reported_without_shell_or_failure(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = self.config(tempdir)
+            with (
+                patch("vv.load_config", return_value=config),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
+                patch(
+                    "vv._update_worker",
+                    return_value=(
+                        "branch",
+                        "working branch 'topic': no upstream",
+                        "fetch origin: new refs\nworking branch 'topic': no upstream",
+                    ),
+                ),
+                patch("vv.spawn_shell") as spawn_shell,
+                redirect_stdout(io.StringIO()) as stdout,
+                redirect_stderr(io.StringIO()) as stderr,
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=False))
+
+            log = Path(config["logfile"]).read_text()
+
+        self.assertEqual(exit_code, 0)
+        spawn_shell.assert_not_called()
+        self.assertIn(
+            "repo: skipped (working branch 'topic': no upstream)\n", stdout.getvalue()
+        )
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertIn("repo: branch", log)
+        self.assertIn("fetch origin: new refs", log)
+
+    def test_interactive_retry_landing_on_working_branch_is_a_skip(self):
+        repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})
+        results = [
+            ("failed", "fetch failed", "initial detail"),
+            ("branch", "working branch 'topic': no upstream", "reason detail"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = self.config(tempdir)
+            with (
+                patch("vv.load_config", return_value=config),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult([repo], [])),
+                patch("vv._update_worker", side_effect=results),
+                patch("vv.interactive_recovery_enabled", return_value=True),
+                patch("vv.spawn_shell") as spawn_shell,
+                redirect_stdout(io.StringIO()) as stdout,
+                redirect_stderr(io.StringIO()),
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=False))
+
+            log = Path(config["logfile"]).read_text()
+
+        self.assertEqual(exit_code, 0)
+        spawn_shell.assert_called_once_with(repo.path)
+        self.assertIn(
+            "repo: skipped (working branch 'topic': no upstream)\n", stdout.getvalue()
+        )
+        self.assertIn("repo: branch", log)
+        self.assertIn("reason detail", log)
 
     def test_interactive_retry_failure_is_logged_and_returns_failure(self):
         repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})

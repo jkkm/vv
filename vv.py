@@ -63,6 +63,10 @@ class DirtyCheckError(RuntimeError):
     """Raised when a repository's dirty state cannot be determined."""
 
 
+class BranchCheckError(RuntimeError):
+    """Raised when the checked-out branch state cannot be determined."""
+
+
 class ConfigError(ValueError):
     """Raised when ~/.vv.conf cannot be loaded or validated."""
 
@@ -256,6 +260,82 @@ def get_all_remotes(path: Path) -> list[str]:
         stdin=subprocess.DEVNULL,
     )
     return result.stdout.splitlines()
+
+
+def get_current_branch(path: Path) -> str | None:
+    """Return the checked-out branch name, or None when HEAD is detached."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "-q", "--short", "HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    # symbolic-ref -q exits 1 without output when HEAD is not symbolic.
+    if result.returncode == 1 and not (result.stdout.strip() or result.stderr.strip()):
+        return None
+    detail = (result.stderr or result.stdout).strip() or f"exit status {result.returncode}"
+    raise BranchCheckError(f"git branch check failed: {detail}")
+
+
+def get_branch_upstream(path: Path, branch: str) -> tuple[str, str] | None:
+    """Return (upstream remote, tracking state) for a branch.
+
+    The remote is "" when no upstream is configured and "." for a local
+    tracking branch. The tracking state is git's "[ahead N, behind N]" or
+    "[gone]" annotation, empty when the branch is in sync. Returns None when
+    the branch does not exist.
+    """
+    result = subprocess.run(
+        [
+            "git", "for-each-ref",
+            "--format=%(upstream:remotename)\t%(upstream:track)",
+            f"refs/heads/{branch}",
+        ],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"exit status {result.returncode}"
+        raise BranchCheckError(f"git upstream check failed: {detail}")
+    line = result.stdout.rstrip("\n")
+    if not line:
+        return None
+    remote, _, track = line.partition("\t")
+    return remote, track
+
+
+def working_branch_reason(path: Path, fetch_remotes: list[str]) -> str | None:
+    """Return why the current checkout must not be merged, or None.
+
+    A checkout is a working state when HEAD is detached or when the current
+    branch does not track a fetched remote, tracks a vanished upstream, or
+    carries local commits. Merging in any of those states would either fail
+    or silently no-op against a stale ref.
+    """
+    branch = get_current_branch(path)
+    if branch is None:
+        return "detached HEAD"
+    upstream = get_branch_upstream(path, branch)
+    if upstream is None:
+        raise BranchCheckError(f"git upstream check failed: no ref for branch '{branch}'")
+    remote, track = upstream
+    if not remote:
+        return f"working branch '{branch}': no upstream"
+    if remote == ".":
+        return f"working branch '{branch}': tracks a local branch"
+    if remote not in fetch_remotes:
+        return f"working branch '{branch}': upstream remote '{remote}' is not fetched"
+    if track == "[gone]":
+        return f"working branch '{branch}': upstream is gone"
+    if "ahead" in track:
+        state = "diverged from" if "behind" in track else "ahead of"
+        return f"working branch '{branch}': {state} upstream"
+    return None
 
 
 def _collapse_progress(text: str) -> str:
@@ -562,7 +642,8 @@ def write_log(log_file: Path, entries: list[tuple[str, str, str | None]]) -> Non
     """Write the most recent update run to the log file.
 
     Each entry is (tree_name, status, detail) where detail may be None.
-    Status values: 'ok', 'dirty', 'failed'.
+    Status values: 'ok', 'dirty', 'branch' (skipped on a working branch),
+    'failed'.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with log_file.open("w") as f:
@@ -619,6 +700,12 @@ def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | Non
         detail = "\n".join(fetch_outputs + errors)
         return "failed", "\n".join(errors), detail
 
+    if repo.driver.name == "git" and not repo.tree_cfg.get("updatecmd"):
+        reason = working_branch_reason(repo.path, fetch_remotes)
+        if reason is not None:
+            log_detail = "\n".join(fetch_outputs + [reason]) or None
+            return "branch", reason, log_detail
+
     ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"), timeout)
 
     if ok and use_submodules:
@@ -665,6 +752,9 @@ def cmd_update(args: argparse.Namespace) -> int:
             if status == "dirty":
                 print(f"{repo.label}: skipped (dirty)")
                 log_entries.append((repo.label, "dirty", None))
+            elif status == "branch":
+                print(f"{repo.label}: skipped ({display})")
+                log_entries.append((repo.label, "branch", log_detail))
             elif status == "ok":
                 print(f"{repo.label}: {display or 'ok'}")
                 log_entries.append((repo.label, "ok", log_detail))
@@ -695,6 +785,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         if status == "ok":
             print(f"{repo.label}: {display or 'ok'}")
             log_entries.append((repo.label, "ok", log_detail))
+        elif status == "branch":
+            print(f"{repo.label}: skipped ({display})")
+            log_entries.append((repo.label, "branch", log_detail))
         elif status == "dirty":
             print(f"{repo.label}: retry skipped (dirty)", file=sys.stderr)
             log_entries.append((repo.label, "dirty", None))

@@ -98,7 +98,14 @@ repos, all remotes are fetched first (or the per-tree `remotes` list if set),
 then a fast-forward merge is performed; this fetch-then-merge approach is
 git-only. Other VCS types use their native update command (`hg pull -u`,
 `svn update`, `cvs update`), or the per-tree `updatecmd` shell command if set.
-Dirty trees are skipped with a warning. Results are printed by the main thread
+Dirty trees are skipped with a warning. Git repositories checked out in a
+working state are fetched but not merged, and reported as skipped rather than
+failed: a detached HEAD, or a branch that has no upstream, tracks a local
+branch or a remote that is not fetched, whose upstream is gone, or that
+carries local commits (ahead of or diverged from its upstream). This keeps
+remote-tracking refs fresh without touching in-progress work. Repositories
+with a custom `updatecmd` skip this check, since the command defines its own
+update behavior. Results are printed by the main thread
 as each update completes, avoiding interleaved output. If any updates fail, an
 interactive shell is spawned in each affected tree (after all parallel updates
 finish) so the problem can be investigated; the update is retried when the
