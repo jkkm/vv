@@ -51,6 +51,7 @@ include:
 | `jobs` | `4` | Number of parallel pulls |
 | `logfile` | `~/.vv.log` | Path to the update log file |
 | `fetch_timeout` | `60` | Seconds before a fetch or update is killed and reported as failed |
+| `ff_default_branch` | `false` | Fast-forward the local default branch when a working branch is checked out (git only; see `vv update`) |
 | `include` | *(none)* | Dict of repo paths to manage outside any basedir (see below) |
 
 ### Per-basedir keys
@@ -74,6 +75,7 @@ or inline as the value under `include.<path>` for standalone repos.
 | `remotes` | List of remotes to fetch; defaults to all from `git remote` (git only) |
 | `updatecmd` | Shell command to run instead of the default update command for the VCS |
 | `submodules` | `true`/`false` to override submodule update behavior; by default `git submodule update --init --recursive` is run after a successful merge when `.gitmodules` exists (git only) |
+| `ff_default_branch` | `true`/`false` to override the top-level `ff_default_branch` setting for this tree (git only) |
 
 ### Include
 
@@ -105,8 +107,19 @@ branch or a remote that is not fetched, whose upstream is gone, or that
 carries local commits (ahead of or diverged from its upstream). This keeps
 remote-tracking refs fresh without touching in-progress work. Repositories
 with a custom `updatecmd` skip this check, since the command defines its own
-update behavior. Results are printed by the main thread
-as each update completes, avoiding interleaved output. If any updates fail, an
+update behavior.
+
+With `ff_default_branch` enabled, a repository skipped as a working branch
+additionally has its default branch brought up to date in the background: when
+the branch named by `refs/remotes/<remote>/HEAD` (for the first fetched remote
+that advertises one) exists locally, is not the checked-out branch, tracks a
+fetched remote, and is strictly behind its upstream, its ref is advanced with
+git's own fast-forward rules. The working tree is untouched, and git refuses
+to move a diverged ref or one checked out in another worktree — the refusal is
+reported, never forced.
+
+Results are printed by the main thread as each update completes, avoiding
+interleaved output. If any updates fail, an
 interactive shell is spawned in each affected tree (after all parallel updates
 finish) so the problem can be investigated; the update is retried when the
 shell exits. Recovery shells are opened only when both input and output are

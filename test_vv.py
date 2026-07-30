@@ -21,6 +21,7 @@ class ConfigValidationTests(unittest.TestCase):
             "jobs": 8,
             "fetch_timeout": 120,
             "logfile": "~/vv.log",
+            "ff_default_branch": True,
             "basedirs": {
                 "~/src": {
                     "exclude": ["ignored"],
@@ -30,6 +31,7 @@ class ConfigValidationTests(unittest.TestCase):
                             "remotes": ["upstream", "origin"],
                             "updatecmd": "make update",
                             "submodules": False,
+                            "ff_default_branch": False,
                         },
                         "defaults": None,
                     },
@@ -108,6 +110,11 @@ class ConfigValidationTests(unittest.TestCase):
             (
                 {"include": {"~/repo": {"submodules": "yes"}}},
                 "include.~/repo.submodules must be a boolean",
+            ),
+            ({"ff_default_branch": "yes"}, "ff_default_branch must be a boolean"),
+            (
+                {"include": {"~/repo": {"ff_default_branch": 1}}},
+                "include.~/repo.ff_default_branch must be a boolean",
             ),
         ]
 
@@ -445,22 +452,27 @@ class BranchStateTests(unittest.TestCase):
             with self.assertRaisesRegex(vv.BranchCheckError, "not a git repository"):
                 vv.get_current_branch(Path("/repo"))
 
-    def test_upstream_remote_and_track_state_are_parsed(self):
+    def test_upstream_remote_track_state_and_ref_are_parsed(self):
         result = subprocess.CompletedProcess(
-            [], 0, stdout="origin\t[ahead 1, behind 2]\n", stderr=""
+            [],
+            0,
+            stdout="origin\t[ahead 1, behind 2]\trefs/remotes/origin/topic\n",
+            stderr="",
         )
 
         with patch("vv.subprocess.run", return_value=result) as run:
             upstream = vv.get_branch_upstream(Path("/repo"), "topic")
 
-        self.assertEqual(upstream, ("origin", "[ahead 1, behind 2]"))
+        self.assertEqual(
+            upstream, ("origin", "[ahead 1, behind 2]", "refs/remotes/origin/topic")
+        )
         self.assertEqual(run.call_args.args[0][-1], "refs/heads/topic")
 
     def test_branch_without_upstream_has_empty_fields(self):
-        result = subprocess.CompletedProcess([], 0, stdout="\t\n", stderr="")
+        result = subprocess.CompletedProcess([], 0, stdout="\t\t\n", stderr="")
 
         with patch("vv.subprocess.run", return_value=result):
-            self.assertEqual(vv.get_branch_upstream(Path("/repo"), "topic"), ("", ""))
+            self.assertEqual(vv.get_branch_upstream(Path("/repo"), "topic"), ("", "", ""))
 
     def test_missing_branch_returns_none(self):
         result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
@@ -488,20 +500,29 @@ class WorkingBranchReasonTests(unittest.TestCase):
             return vv.working_branch_reason(Path("/repo"), list(fetch_remotes))
 
     def test_working_states_are_reported_with_their_cause(self):
+        upstream_ref = "refs/remotes/origin/topic"
         cases = [
             (None, None, "detached HEAD"),
-            ("topic", ("", ""), "working branch 'topic': no upstream"),
-            ("topic", (".", ""), "working branch 'topic': tracks a local branch"),
+            ("topic", ("", "", ""), "working branch 'topic': no upstream"),
+            ("topic", (".", "", ""), "working branch 'topic': tracks a local branch"),
             (
                 "topic",
-                ("github", ""),
+                ("github", "", "refs/remotes/github/topic"),
                 "working branch 'topic': upstream remote 'github' is not fetched",
             ),
-            ("topic", ("origin", "[gone]"), "working branch 'topic': upstream is gone"),
-            ("topic", ("origin", "[ahead 2]"), "working branch 'topic': ahead of upstream"),
             (
                 "topic",
-                ("origin", "[ahead 1, behind 3]"),
+                ("origin", "[gone]", upstream_ref),
+                "working branch 'topic': upstream is gone",
+            ),
+            (
+                "topic",
+                ("origin", "[ahead 2]", upstream_ref),
+                "working branch 'topic': ahead of upstream",
+            ),
+            (
+                "topic",
+                ("origin", "[ahead 1, behind 3]", upstream_ref),
                 "working branch 'topic': diverged from upstream",
             ),
         ]
@@ -513,11 +534,118 @@ class WorkingBranchReasonTests(unittest.TestCase):
     def test_tracking_branch_that_can_fast_forward_is_not_a_working_state(self):
         for track in ("", "[behind 3]"):
             with self.subTest(track=track):
-                self.assertIsNone(self.reason("main", ("origin", track)))
+                self.assertIsNone(
+                    self.reason("main", ("origin", track, "refs/remotes/origin/main"))
+                )
 
     def test_missing_branch_ref_is_an_error(self):
         with self.assertRaisesRegex(vv.BranchCheckError, "no ref for branch 'topic'"):
             self.reason("topic", None)
+
+
+class FfDefaultBranchConfigTests(unittest.TestCase):
+    def test_tree_setting_overrides_top_level_setting(self):
+        cases = [
+            ({}, {}, False),
+            ({"ff_default_branch": True}, {}, True),
+            ({}, {"ff_default_branch": True}, True),
+            ({"ff_default_branch": True}, {"ff_default_branch": False}, False),
+            ({"ff_default_branch": False}, {"ff_default_branch": True}, True),
+        ]
+
+        for config, tree_cfg, expected in cases:
+            with self.subTest(config=config, tree_cfg=tree_cfg):
+                self.assertEqual(vv.get_ff_default_branch(config, tree_cfg), expected)
+
+
+class RemoteDefaultBranchTests(unittest.TestCase):
+    def test_remote_head_yields_the_branch_name(self):
+        result = subprocess.CompletedProcess([], 0, stdout="origin/main\n", stderr="")
+
+        with patch("vv.subprocess.run", return_value=result) as run:
+            self.assertEqual(vv.get_remote_default_branch(Path("/repo"), "origin"), "main")
+
+        self.assertEqual(run.call_args.args[0][-1], "refs/remotes/origin/HEAD")
+
+    def test_unset_remote_head_returns_none(self):
+        result = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+
+        with patch("vv.subprocess.run", return_value=result):
+            self.assertIsNone(vv.get_remote_default_branch(Path("/repo"), "origin"))
+
+    def test_lookup_failure_is_an_error(self):
+        result = subprocess.CompletedProcess(
+            [], 128, stdout="", stderr="fatal: not a git repository"
+        )
+
+        with patch("vv.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(vv.BranchCheckError, "not a git repository"):
+                vv.get_remote_default_branch(Path("/repo"), "origin")
+
+
+class FastForwardDefaultBranchTests(unittest.TestCase):
+    @staticmethod
+    def fast_forward(
+        current="topic",
+        default="main",
+        upstream=("origin", "[behind 2]", "refs/remotes/origin/main"),
+        fetch_result=subprocess.CompletedProcess([], 0, stdout=b"", stderr=b""),
+    ):
+        with (
+            patch("vv.get_current_branch", return_value=current),
+            patch("vv.get_remote_default_branch", return_value=default),
+            patch("vv.get_branch_upstream", return_value=upstream),
+            patch("vv.subprocess.run", return_value=fetch_result) as run,
+        ):
+            note = vv.fast_forward_default_branch(Path("/repo"), ["origin"], 10)
+        return note, run
+
+    def test_default_branch_behind_upstream_is_fast_forwarded(self):
+        note, run = self.fast_forward()
+
+        self.assertEqual(note, "fast-forwarded 'main' to origin/main")
+        run.assert_called_once()
+        self.assertEqual(
+            run.call_args.args[0],
+            ["git", "fetch", ".", "refs/remotes/origin/main:refs/heads/main"],
+        )
+
+    def test_refused_fast_forward_is_reported_not_forced(self):
+        rejected = subprocess.CompletedProcess(
+            [],
+            1,
+            stdout=b"",
+            stderr=b"From .\n ! [rejected] origin/main -> main  (non-fast-forward)\n",
+        )
+
+        note, _run = self.fast_forward(fetch_result=rejected)
+
+        self.assertEqual(
+            note,
+            "default branch 'main' not fast-forwarded: "
+            "! [rejected] origin/main -> main  (non-fast-forward)",
+        )
+
+    def test_states_with_nothing_to_do_are_silent(self):
+        upstream_ref = "refs/remotes/origin/main"
+        cases = [
+            {"default": None},
+            {"default": "topic"},  # the default branch is checked out
+            {"upstream": None},  # no local branch for the remote default
+            {"upstream": ("", "", "")},
+            {"upstream": (".", "", "")},
+            {"upstream": ("github", "[behind 2]", "refs/remotes/github/main")},
+            {"upstream": ("origin", "", upstream_ref)},
+            {"upstream": ("origin", "[gone]", upstream_ref)},
+            {"upstream": ("origin", "[ahead 1]", upstream_ref)},
+            {"upstream": ("origin", "[ahead 1, behind 2]", upstream_ref)},
+        ]
+
+        for kwargs in cases:
+            with self.subTest(**kwargs):
+                note, run = self.fast_forward(**kwargs)
+                self.assertIsNone(note)
+                run.assert_not_called()
 
 
 class UpdateWorkerTests(unittest.TestCase):
@@ -559,6 +687,71 @@ class UpdateWorkerTests(unittest.TestCase):
         git_fetch.assert_called_once_with(Path("/repo"), "origin", 10)
         reason.assert_called_once_with(Path("/repo"), ["origin"])
         run_update.assert_not_called()
+
+    def test_working_branch_skip_fast_forwards_default_branch_when_enabled(self):
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "new refs")),
+            patch(
+                "vv.working_branch_reason",
+                return_value="working branch 'topic': no upstream",
+            ),
+            patch(
+                "vv.fast_forward_default_branch",
+                return_value="fast-forwarded 'main' to origin/main",
+            ) as fast_forward,
+            patch("vv.run_update") as run_update,
+        ):
+            status, display, detail = vv._update_worker(self.repo, 10, ff_default=True)
+
+        self.assertEqual(status, "branch")
+        self.assertEqual(
+            display,
+            "working branch 'topic': no upstream; fast-forwarded 'main' to origin/main",
+        )
+        self.assertEqual(
+            detail,
+            "fetch origin: new refs\n"
+            "working branch 'topic': no upstream\n"
+            "fast-forwarded 'main' to origin/main",
+        )
+        fast_forward.assert_called_once_with(Path("/repo"), ["origin"], 10)
+        run_update.assert_not_called()
+
+    def test_working_branch_skip_leaves_default_branch_alone_by_default(self):
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "")),
+            patch(
+                "vv.working_branch_reason",
+                return_value="working branch 'topic': no upstream",
+            ),
+            patch("vv.fast_forward_default_branch") as fast_forward,
+        ):
+            status, display, _detail = vv._update_worker(self.repo, 10)
+
+        self.assertEqual(status, "branch")
+        self.assertEqual(display, "working branch 'topic': no upstream")
+        fast_forward.assert_not_called()
+
+    def test_fast_forward_with_nothing_to_do_keeps_the_skip_reason_alone(self):
+        with (
+            patch("vv.is_dirty", return_value=False),
+            patch("vv.get_all_remotes", return_value=["origin"]),
+            patch("vv.git_fetch", return_value=(True, "")),
+            patch(
+                "vv.working_branch_reason",
+                return_value="working branch 'topic': no upstream",
+            ),
+            patch("vv.fast_forward_default_branch", return_value=None),
+        ):
+            status, display, detail = vv._update_worker(self.repo, 10, ff_default=True)
+
+        self.assertEqual(status, "branch")
+        self.assertEqual(display, "working branch 'topic': no upstream")
+        self.assertEqual(detail, "working branch 'topic': no upstream")
 
     def test_tracking_branch_in_sync_is_merged(self):
         with (
@@ -757,7 +950,7 @@ class UpdateCommandTests(unittest.TestCase):
             exit_code = vv.cmd_update(argparse.Namespace())
 
         self.assertEqual(exit_code, 1)
-        worker.assert_called_once_with(repo, 60)
+        worker.assert_called_once_with(repo, 60, False)
         self.assertIn("basedir does not exist: /missing", stderr.getvalue())
 
     def test_worker_exception_is_recovered_and_full_workflow_is_retried(self):
@@ -779,8 +972,38 @@ class UpdateCommandTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("unexpected error: missing git", stderr.getvalue())
-        self.assertEqual(worker.call_args_list, [call(repo, 60), call(repo, 60)])
+        self.assertEqual(
+            worker.call_args_list, [call(repo, 60, False), call(repo, 60, False)]
+        )
         spawn_shell.assert_called_once_with(repo.path)
+
+    def test_ff_default_branch_setting_reaches_workers_per_tree(self):
+        repos = [
+            vv.Repo(Path("/plain"), vv._VCS_BY_NAME["git"], "plain", {}),
+            vv.Repo(
+                Path("/pinned"),
+                vv._VCS_BY_NAME["git"],
+                "pinned",
+                {"ff_default_branch": False},
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            config = self.config(tempdir) | {"ff_default_branch": True}
+            with (
+                patch("vv.load_config", return_value=config),
+                patch("vv.get_repos", return_value=vv.DiscoveryResult(repos, [])),
+                patch("vv._update_worker", return_value=("ok", None, None)) as worker,
+                patch("vv.write_log"),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = vv.cmd_update(argparse.Namespace(no_interactive=True))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            sorted(worker.call_args_list, key=lambda c: c.args[0].label),
+            [call(repos[1], 60, False), call(repos[0], 60, True)],
+        )
 
     def test_working_branch_skip_is_reported_without_shell_or_failure(self):
         repo = vv.Repo(Path("/repo"), vv._VCS_BY_NAME["git"], "repo", {})

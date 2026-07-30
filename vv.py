@@ -37,9 +37,9 @@ DEFAULT_BASEDIR = Path.home() / "src"
 DEFAULT_JOBS = 4
 DEFAULT_FETCH_TIMEOUT = 60  # seconds
 
-_TOP_LEVEL_KEYS = {"basedirs", "fetch_timeout", "include", "jobs", "logfile"}
+_TOP_LEVEL_KEYS = {"basedirs", "fetch_timeout", "ff_default_branch", "include", "jobs", "logfile"}
 _BASEDIR_KEYS = {"exclude", "trees"}
-_TREE_KEYS = {"remotes", "submodules", "type", "updatecmd"}
+_TREE_KEYS = {"ff_default_branch", "remotes", "submodules", "type", "updatecmd"}
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,10 @@ def _validate_tree_config(value: object, key: str) -> None:
     if submodules is not None and not isinstance(submodules, bool):
         raise _config_type_error(f"{key}.submodules", "a boolean")
 
+    ff_default = value.get("ff_default_branch")
+    if ff_default is not None and not isinstance(ff_default, bool):
+        raise _config_type_error(f"{key}.ff_default_branch", "a boolean")
+
 
 def validate_config(config: dict) -> None:
     """Raise ConfigError if config does not match the supported schema."""
@@ -171,6 +175,10 @@ def validate_config(config: dict) -> None:
     logfile = config.get("logfile")
     if logfile is not None and not isinstance(logfile, str):
         raise _config_type_error("logfile", "a string")
+
+    ff_default = config.get("ff_default_branch")
+    if ff_default is not None and not isinstance(ff_default, bool):
+        raise _config_type_error("ff_default_branch", "a boolean")
 
     basedirs = config.get("basedirs")
     if basedirs is not None:
@@ -251,6 +259,13 @@ def get_log_file(config: dict) -> Path:
     return Path(raw).expanduser() if raw else DEFAULT_LOG_FILE
 
 
+def get_ff_default_branch(config: dict, tree_cfg: dict) -> bool:
+    value = tree_cfg.get("ff_default_branch")
+    if value is None:
+        value = config.get("ff_default_branch")
+    return bool(value)
+
+
 def get_all_remotes(path: Path) -> list[str]:
     result = subprocess.run(
         ["git", "remote"],
@@ -280,18 +295,19 @@ def get_current_branch(path: Path) -> str | None:
     raise BranchCheckError(f"git branch check failed: {detail}")
 
 
-def get_branch_upstream(path: Path, branch: str) -> tuple[str, str] | None:
-    """Return (upstream remote, tracking state) for a branch.
+def get_branch_upstream(path: Path, branch: str) -> tuple[str, str, str] | None:
+    """Return (upstream remote, tracking state, upstream ref) for a branch.
 
     The remote is "" when no upstream is configured and "." for a local
     tracking branch. The tracking state is git's "[ahead N, behind N]" or
-    "[gone]" annotation, empty when the branch is in sync. Returns None when
-    the branch does not exist.
+    "[gone]" annotation, empty when the branch is in sync. The upstream ref
+    is the full remote-tracking ref, e.g. "refs/remotes/origin/main". Returns
+    None when the branch does not exist.
     """
     result = subprocess.run(
         [
             "git", "for-each-ref",
-            "--format=%(upstream:remotename)\t%(upstream:track)",
+            "--format=%(upstream:remotename)\t%(upstream:track)\t%(upstream)",
             f"refs/heads/{branch}",
         ],
         cwd=path,
@@ -305,8 +321,72 @@ def get_branch_upstream(path: Path, branch: str) -> tuple[str, str] | None:
     line = result.stdout.rstrip("\n")
     if not line:
         return None
-    remote, _, track = line.partition("\t")
-    return remote, track
+    remote, _, rest = line.partition("\t")
+    track, _, upstream_ref = rest.partition("\t")
+    return remote, track, upstream_ref
+
+
+def get_remote_default_branch(path: Path, remote: str) -> str | None:
+    """Return the branch named by refs/remotes/<remote>/HEAD, or None if unset."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "-q", "--short", f"refs/remotes/{remote}/HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    if result.returncode == 0:
+        short = result.stdout.strip()
+        prefix = f"{remote}/"
+        return short[len(prefix):] if short.startswith(prefix) else None
+    if result.returncode == 1 and not (result.stdout.strip() or result.stderr.strip()):
+        return None
+    detail = (result.stderr or result.stdout).strip() or f"exit status {result.returncode}"
+    raise BranchCheckError(f"git default branch check failed: {detail}")
+
+
+def fast_forward_default_branch(path: Path, fetch_remotes: list[str], timeout: int) -> str | None:
+    """Fast-forward the local default branch from its upstream, if possible.
+
+    Called when the checkout was skipped as a working state, so the default
+    branch is not the checked-out branch. The ref is advanced with git's own
+    fast-forward rules and the working tree is untouched; git refuses to move
+    a diverged ref or one checked out in another worktree, and the refusal is
+    reported rather than forced. Returns a note describing what happened, or
+    None when there is nothing to do.
+    """
+    current = get_current_branch(path)
+    default = None
+    for remote in fetch_remotes:
+        default = get_remote_default_branch(path, remote)
+        if default:
+            break
+    if not default or default == current:
+        return None
+    upstream = get_branch_upstream(path, default)
+    if upstream is None:
+        return None
+    remote, track, upstream_ref = upstream
+    if not remote or remote == "." or remote not in fetch_remotes:
+        return None
+    if not track.startswith("[behind"):
+        return None
+    upstream_short = upstream_ref.removeprefix("refs/remotes/")
+    try:
+        result = subprocess.run(
+            ["git", "fetch", ".", f"{upstream_ref}:refs/heads/{default}"],
+            cwd=path,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"default branch '{default}': fast-forward timed out after {timeout}s"
+    if result.returncode != 0:
+        lines = [line.strip() for line in _combined_output(result).splitlines() if line.strip()]
+        detail = lines[-1] if lines else f"exit status {result.returncode}"
+        return f"default branch '{default}' not fast-forwarded: {detail}"
+    return f"fast-forwarded '{default}' to {upstream_short}"
 
 
 def working_branch_reason(path: Path, fetch_remotes: list[str]) -> str | None:
@@ -323,7 +403,7 @@ def working_branch_reason(path: Path, fetch_remotes: list[str]) -> str | None:
     upstream = get_branch_upstream(path, branch)
     if upstream is None:
         raise BranchCheckError(f"git upstream check failed: no ref for branch '{branch}'")
-    remote, track = upstream
+    remote, track, _upstream_ref = upstream
     if not remote:
         return f"working branch '{branch}': no upstream"
     if remote == ".":
@@ -671,7 +751,9 @@ def interactive_recovery_enabled(args: argparse.Namespace) -> bool:
     )
 
 
-def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | None]:
+def _update_worker(
+    repo: Repo, timeout: int, ff_default: bool = False
+) -> tuple[str, str | None, str | None]:
     """Thread worker: fetch all remotes then fast-forward merge.
 
     Returns (status, display_output, log_detail) where display_output is
@@ -703,8 +785,13 @@ def _update_worker(repo: Repo, timeout: int) -> tuple[str, str | None, str | Non
     if repo.driver.name == "git" and not repo.tree_cfg.get("updatecmd"):
         reason = working_branch_reason(repo.path, fetch_remotes)
         if reason is not None:
-            log_detail = "\n".join(fetch_outputs + [reason]) or None
-            return "branch", reason, log_detail
+            parts = [reason]
+            if ff_default:
+                note = fast_forward_default_branch(repo.path, fetch_remotes, timeout)
+                if note:
+                    parts.append(note)
+            log_detail = "\n".join(fetch_outputs + parts) or None
+            return "branch", "; ".join(parts), log_detail
 
     ok, update_out = run_update(repo.path, repo.driver, repo.tree_cfg.get("updatecmd"), timeout)
 
@@ -740,7 +827,12 @@ def cmd_update(args: argparse.Namespace) -> int:
     log_entries: list[tuple[str, str, str | None]] = []
     failures: list[tuple[Repo, str | None]] = []
     with ThreadPoolExecutor(max_workers=jobs) as executor:
-        futures = {executor.submit(_update_worker, repo, timeout): repo for repo in repos}
+        futures = {
+            executor.submit(
+                _update_worker, repo, timeout, get_ff_default_branch(config, repo.tree_cfg)
+            ): repo
+            for repo in repos
+        }
         for future in as_completed(futures):
             repo = futures[future]
             try:
@@ -777,7 +869,9 @@ def cmd_update(args: argparse.Namespace) -> int:
     for repo, _initial_log_detail in failures:
         spawn_shell(repo.path)
         try:
-            status, display, log_detail = _update_worker(repo, timeout)
+            status, display, log_detail = _update_worker(
+                repo, timeout, get_ff_default_branch(config, repo.tree_cfg)
+            )
         except Exception as exc:
             status = "failed"
             display = f"unexpected error: {exc}"
